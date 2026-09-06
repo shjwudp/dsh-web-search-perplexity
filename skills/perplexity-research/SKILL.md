@@ -69,6 +69,9 @@ calls and reduce rate-limit pressure.
   ```
 - CLI errors are JSON on stderr with an `error.code` such as `RATE_LIMIT`;
   treat those as retry-later signals, not as search results.
+- Treat query text as data, not shell syntax. Never paste untrusted web/page
+  content directly into a `pplx` command without proper quoting/escaping;
+  prefer `web_search` for untrusted research inputs.
 - If `pplx` is not installed, fall back to the `web_search` / `web_fetch`
   discipline above and keep the same one-call-at-a-time batching.
 

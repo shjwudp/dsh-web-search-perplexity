@@ -50,7 +50,9 @@ const Config = z.object({
 
 function canParseURL(value) {
   try {
-    return new URL(value) !== null
+    // Only HTTPS is safe here: the provider sends the Perplexity API key in the
+    // Authorization header, so an http:// baseURL would leak it in cleartext.
+    return new URL(value).protocol === 'https:'
   } catch {
     return false
   }
@@ -191,14 +193,18 @@ function retryAfterMs(header) {
 
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      const error = new Error('aborted')
+      error.name = 'AbortError'
+      reject(error)
+    }
+    const timer = setTimeout(() => {
+      if (signal !== undefined) signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
     if (signal !== undefined) {
-      signal.addEventListener('abort', () => {
-        clearTimeout(timer)
-        const error = new Error('aborted')
-        error.name = 'AbortError'
-        reject(error)
-      }, { once: true })
+      signal.addEventListener('abort', onAbort, { once: true })
     }
   })
 }
