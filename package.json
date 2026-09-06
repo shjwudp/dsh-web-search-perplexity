@@ -1,6 +1,6 @@
 {
   "name": "@shjwudp/dsh-web-search-perplexity",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Standalone Perplexity search provider for the DeepSeek Harness web seam (ctx.web). No internal-only dependencies; reads PERPLEXITY_API_KEY from the environment.",
   "type": "module",
   "main": "src/index.js",
@@ -11,6 +11,7 @@
   },
   "files": [
     "src",
+    "skills",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -30,7 +31,9 @@
     }
   },
   "scripts": {
-    "check": "node --check src/index.js && node --check src/client.js"
+    "check": "node --check src/index.js && node --check src/client.js && node --check src/skill.js",
+    "build:skill": "node scripts/build-skill.mjs",
+    "prepack": "npm run build:skill"
   },
   "keywords": [
     "dsh",

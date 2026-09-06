@@ -18,6 +18,7 @@
 
 import z from '@deepseek-ai/schemastery'
 import { WebError } from '@deepseek-ai/dsh-web'
+import { PERPLEXITY_RESEARCH_SKILL } from './skill.js'
 
 export const name = 'web-search-perplexity'
 export const inject = ['web']
@@ -288,6 +289,13 @@ export function apply(ctx, config = {}) {
       onChange: () => {},
     })
   })
+
+  // Contribute an embedded research skill when the skill registry is mounted.
+  // This is defensive: without the `dsh-skill` service the provider still works.
+  const skills = ctx.get('skills')
+  if (skills !== undefined && typeof skills.register === 'function') {
+    skills.register(PERPLEXITY_RESEARCH_SKILL)
+  }
 
   ctx.web.registerSearchProvider({
     id: 'perplexity',

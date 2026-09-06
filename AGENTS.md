@@ -25,7 +25,7 @@ npm package.
   behavior, use official documentation and upstream repositories first.
 - Use `perplexity-research` when a task depends on current, version-specific,
   externally verifiable, or disputed information. A copyable example skill
-  lives at `examples/skills/perplexity-research/SKILL.md`; copy it into a DSH
+  lives at `skills/perplexity-research/SKILL.md`; copy it into a DSH
   skills root (for example `~/.dsh/skills/`) to activate it.
 
 ## External research safety

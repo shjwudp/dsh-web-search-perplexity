@@ -103,5 +103,11 @@ HTTP redirects are rejected. Failures surface as `WebError` with
 ## Development
 
 ```bash
-npm run check
+npm run check        # syntax-check the host, client, and generated skill module
+npm run build:skill  # regenerate src/skill.js from the markdown skill source
 ```
+
+The embedded `perplexity-research` skill is authored as plain markdown at
+`skills/perplexity-research/SKILL.md`. `src/skill.js` is generated
+from that file; edit the markdown, then run `npm run build:skill` (also run
+automatically before packing/publishing via `prepack`).
