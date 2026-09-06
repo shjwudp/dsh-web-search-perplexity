@@ -37,7 +37,9 @@ Then tell the web seam to use the Perplexity provider in
     fetchProvider: http
 ```
 
-Set the API key in the terminal that starts DSH (never in a patch file):
+Set the API key either in the terminal that starts DSH, or later in the web UI
+(Settings → Plugins → Plugin configuration → Perplexity web search). Never put
+it in a patch file:
 
 ```powershell
 # Windows PowerShell
@@ -56,21 +58,37 @@ tools remain the standard `web_search` / `web_fetch` from `dsh-tool-web`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `apiKey` | `$PERPLEXITY_API_KEY` | Perplexity API key; provider is unavailable when empty |
-| `baseURL` | `https://api.perplexity.ai` | Endpoint base; `/chat/completions` is appended |
-| `model` | `sonar` | Search model |
-| `maxTokens` | `1024` | `max_tokens` for the generated answer |
-| `searchRecency` | unset | Optional `search_recency_filter` — `day`, `week`, `month`, or `year` |
+| `apiKey` | unset | Literal Perplexity API key (secret role; normally configured in the UI instead) |
+| `apiKeyEnv` | `PERPLEXITY_API_KEY` | Credential reference used by the UI-stored key |
+| `apiMode` | `agent` | `agent` = Agent API (`/v1/agent`, default); `sonar` = Sonar Chat Completions (`/chat/completions`) |
+| `preset` | unset | Agent mode only: dynamic preset `fast`, `low`, `medium`, `high`, `xhigh`, or `wide-research`. When set, Perplexity picks the model; `model` is only sent as an override if it is a `provider/model` slug. |
+| `baseURL` | `https://api.perplexity.ai` | Endpoint base; the mode appends its own path |
+| `model` | `sonar` | `sonar` / `sonar-pro` / `sonar-reasoning-pro` / `sonar-deep-research` in Sonar mode; any Agent API model id (e.g. `openai/gpt-5.6-luna`) in Agent mode |
+| `maxTokens` | `1024` | `max_tokens` (Sonar mode) or `max_output_tokens` (Agent mode) for the generated answer |
+| `searchRecency` | unset | Sonar-mode only: `day`, `week`, `month`, or `year` |
 
-`apiKey` is read from the plugin config first, then the `PERPLEXITY_API_KEY`
-environment variable. The bundled patch layer deliberately does NOT list
-`apiKey`; the environment variable is sufficient.
+> **Sonar deprecation note**: Perplexity's Sonar Chat Completions API is
+> deprecated and will be supported until **September 27, 2026**; the
+> replacement is the Agent API. Switch `apiMode` to `agent` before that date.
+
+The provider resolves the API key in this order:
+
+1. a literal `apiKey` config value (not recommended);
+2. the credentials domain entry named by `apiKeyEnv` — this is what the web UI
+   writes when you save the key in the Perplexity card;
+3. the `PERPLEXITY_API_KEY` process environment variable.
+
+The bundled patch layer deliberately does NOT list `apiKey`; the UI or the
+environment variable are the intended key sources.
 
 ## UI surfaces
 
 - **Plugin configuration card**: Settings → Plugins → Plugin configuration
-  shows a read-only `Perplexity web search` card for the
-  `web-search-perplexity` settings namespace.
+  shows a collapsible, editable `Perplexity web search` card for the
+  `web-search-perplexity` settings namespace. It edits `baseURL`, `apiMode`,
+  `preset` (Agent mode), `model` (Sonar or Agent API model dropdowns),
+  `maxTokens`, `searchRecency` (Sonar mode only), and the API key (write-only
+  secret field).
 
 ## Response mapping
 
