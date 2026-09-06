@@ -24,7 +24,7 @@ dependencies.
 ## Install
 
 ```bash
-dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.1
+dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.2
 ```
 
 Then tell the web seam to use the Perplexity provider in
