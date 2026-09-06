@@ -1,0 +1,22 @@
+# Layer contributed when a profile installs @shjwudp/dsh-web-search-perplexity.
+#
+# Neutral defaults. The API key is read from the environment so the secret
+# never has to live as plaintext in a patch file. Override in the user's
+# profile cordis.patch.yml if needed (restate all keys — patch rows are
+# replaced whole):
+#
+#   - id: web-search-perplexity
+#     config:
+#       apiKey: !!js process.env.PERPLEXITY_API_KEY
+#       baseURL: https://api.perplexity.ai
+#       model: sonar
+#       maxTokens: 1024
+
+- insert:
+    - id: web-search-perplexity
+      name: '@shjwudp/dsh-web-search-perplexity'
+      config:
+        apiKey: !!js process.env.PERPLEXITY_API_KEY
+        baseURL: https://api.perplexity.ai
+        model: sonar
+        maxTokens: 1024
