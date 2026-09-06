@@ -11,10 +11,20 @@ This package exists because the official
 (E404) for current dsh releases. This plugin has no internal-only
 dependencies.
 
+## Compatibility
+
+- Tested with **DSH 0.1.2-rc.1** (`@deepseek-ai/dsh-web` 0.1.2-rc.1)
+- Peer dependency: `@deepseek-ai/dsh-web: ^0.1.2-rc.1`
+- Requires a DSH profile with the `ctx.web` seam mounted and the model-facing
+  tools `web_search` / `web_fetch` enabled (`dsh-tool-web`). In the `web`
+  profile, `dsh-tool-web` is disabled by the web-app layer by default; enable
+  it with `- id: tool-web, disabled: false` in the profile patch.
+- Node ≥ 18
+
 ## Install
 
 ```bash
-dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.0
+dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.1
 ```
 
 Then tell the web seam to use the Perplexity provider in
@@ -47,13 +57,18 @@ tools remain the standard `web_search` / `web_fetch` from `dsh-tool-web`.
 | `searchRecency` | unset | Optional `search_recency_filter` — `day`, `week`, `month`, or `year` |
 
 `apiKey` is read from the plugin config first, then the `PERPLEXITY_API_KEY`
-environment variable. The bundled patch layer already sets
-`apiKey: !!js process.env.PERPLEXITY_API_KEY`, so the environment variable is
-sufficient.
+environment variable. The bundled patch layer deliberately does NOT list
+`apiKey`; the environment variable is sufficient.
+
+## UI surfaces
+
+- **Plugin configuration card**: Settings → Plugins → Plugin configuration
+  shows a read-only `Perplexity web search` card for the
+  `web-search-perplexity` settings namespace.
 
 ## Response mapping
 
-- `content` ← `choices[0].message.content` (the generated answer)
+- `content` ← `choices[0].message.content` (the generated answer, unchanged)
 - `sources[]` ← structured `search_results[]` (`url`, `title`, `snippet`,
   `publishedAt` from `date`)
 - If `search_results` is absent, `sources[]` ← URL-only `citations[]`
@@ -64,5 +79,5 @@ HTTP redirects are rejected. Failures surface as `WebError` with
 ## Development
 
 ```bash
-node --check src/index.js
+npm run check
 ```

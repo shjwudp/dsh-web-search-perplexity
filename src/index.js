@@ -12,15 +12,24 @@
  * config or the `PERPLEXITY_API_KEY` environment variable.
  */
 
+import z from '@deepseek-ai/schemastery'
 import { WebError } from '@deepseek-ai/dsh-web'
 
 export const name = 'web-search-perplexity'
 export const inject = ['web']
 
+const SETTINGS_NAMESPACE = 'web-search-perplexity'
 const DEFAULT_BASE_URL = 'https://api.perplexity.ai'
 const DEFAULT_MODEL = 'sonar'
 const DEFAULT_MAX_TOKENS = 1024
 const USER_AGENT = 'dsh-web-search-perplexity/0.1.0'
+
+/** Durable settings section surfaced as a plugin-config card in the web UI. */
+const Config = z.object({
+  baseURL: z.string().default(DEFAULT_BASE_URL),
+  model: z.string().default(DEFAULT_MODEL),
+  maxTokens: z.number().step(1).min(1).default(DEFAULT_MAX_TOKENS),
+})
 
 function canParseURL(value) {
   try {
@@ -63,37 +72,55 @@ function mapPerplexityResponse(data) {
  * @param {object} config - row config from cordis.yml / patch layers.
  */
 export function apply(ctx, config = {}) {
-  const apiKey = String(config.apiKey ?? process.env.PERPLEXITY_API_KEY ?? '').trim()
-  const baseURL = String(config.baseURL ?? DEFAULT_BASE_URL).trim()
-  const model = String(config.model ?? DEFAULT_MODEL).trim()
-  const maxTokens = Number(config.maxTokens ?? DEFAULT_MAX_TOKENS)
-  const searchRecency = config.searchRecency
+  let current = () => config
+
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, SETTINGS_NAMESPACE, Config, config, {
+      setSource: (source) => {
+        current = source
+      },
+      onChange: () => {},
+    })
+  })
+
+  const resolveOptions = () => {
+    const c = current() ?? {}
+    return {
+      apiKey: String(c.apiKey ?? process.env.PERPLEXITY_API_KEY ?? '').trim(),
+      baseURL: String(c.baseURL ?? DEFAULT_BASE_URL).trim(),
+      model: String(c.model ?? DEFAULT_MODEL).trim(),
+      maxTokens: Number(c.maxTokens ?? DEFAULT_MAX_TOKENS),
+      searchRecency: c.searchRecency,
+    }
+  }
 
   ctx.web.registerSearchProvider({
     id: 'perplexity',
     available() {
-      return apiKey.length > 0
-        && canParseURL(baseURL)
-        && Number.isInteger(maxTokens)
-        && maxTokens > 0
+      const options = resolveOptions()
+      return options.apiKey.length > 0
+        && canParseURL(options.baseURL)
+        && Number.isInteger(options.maxTokens)
+        && options.maxTokens > 0
     },
     async search(request, signal) {
+      const options = resolveOptions()
       let response
       try {
-        response = await fetch(`${baseURL}/chat/completions`, {
+        response = await fetch(`${options.baseURL}/chat/completions`, {
           method: 'POST',
           redirect: 'error',
           headers: {
-            authorization: `Bearer ${apiKey}`,
+            authorization: `Bearer ${options.apiKey}`,
             'content-type': 'application/json',
             accept: 'application/json',
             'user-agent': USER_AGENT,
           },
           body: JSON.stringify({
-            model,
-            max_tokens: maxTokens,
+            model: options.model,
+            max_tokens: options.maxTokens,
             messages: [{ role: 'user', content: request.query }],
-            ...(searchRecency !== undefined ? { search_recency_filter: searchRecency } : {}),
+            ...(options.searchRecency !== undefined ? { search_recency_filter: options.searchRecency } : {}),
           }),
           ...(signal !== undefined ? { signal } : {}),
         })
