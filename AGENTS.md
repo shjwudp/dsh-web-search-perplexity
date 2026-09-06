@@ -9,8 +9,9 @@ This repository is a standalone DeepSeek Harness plugin
 - `cordis.patch.yml` — bundled loader patch (inserts the plugin row)
 - `package.json` — package metadata, `dsh.bundle`, `dsh.client`, peer deps
 
-`AGENTS.md` and `.agents/skills/` are development aids only; they are not part
-of the installed plugin runtime and are not published in the npm package.
+`AGENTS.md` and the example skill under `examples/` are development aids only;
+they are not part of the installed plugin runtime and are not published in the
+npm package.
 
 ## Commands
 
@@ -22,11 +23,10 @@ of the installed plugin runtime and are not published in the npm package.
   this repository's current behavior.
 - For upstream PyTorch, CUDA, NCCL, Megatron, DeepSeek Harness, and vendor API
   behavior, use official documentation and upstream repositories first.
-- Use `perplexity-research` (see `.agents/skills/perplexity-research/SKILL.md`)
-  when a task depends on current, version-specific, externally verifiable, or
-  disputed information.
-- Note: this project-level skill takes precedence over a user-level skill with
-  the same name while the workspace root is this repository.
+- Use `perplexity-research` when a task depends on current, version-specific,
+  externally verifiable, or disputed information. A copyable example skill
+  lives at `examples/skills/perplexity-research/SKILL.md`; copy it into a DSH
+  skills root (for example `~/.dsh/skills/`) to activate it.
 
 ## External research safety
 
