@@ -40,7 +40,13 @@ Then tell the web seam to use the Perplexity provider in
 Set the API key in the terminal that starts DSH (never in a patch file):
 
 ```powershell
+# Windows PowerShell
 $env:PERPLEXITY_API_KEY = "pplx-..."
+```
+
+```bash
+# macOS / Linux (bash/zsh)
+export PERPLEXITY_API_KEY="pplx-..."
 ```
 
 Restart DSH. The provider registers itself as `perplexity`; the model-facing
