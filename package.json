@@ -32,6 +32,7 @@
   },
   "scripts": {
     "check": "node --check src/index.js && node --check src/client.js && node --check src/skill.js",
+    "test": "node test/soft-deadline.test.mjs",
     "build:skill": "node scripts/build-skill.mjs",
     "prepack": "npm run build:skill"
   },

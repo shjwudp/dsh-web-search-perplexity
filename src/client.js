@@ -48,6 +48,13 @@ window.__ModuleLoader__.load({
         { value: 'xhigh', label: 'xhigh — open-ended agentic' },
         { value: 'wide-research', label: 'wide-research — large collections' },
       ]
+      /**
+       * Presets usable as a degraded retry. `wide-research` is excluded: it is a
+       * minutes-long background workflow, not a latency fallback.
+       */
+      const FALLBACK_PRESET_OPTIONS = PRESET_OPTIONS.filter(
+        (option) => option.value !== '' && option.value !== 'wide-research',
+      )
       const AGENT_MODEL_GROUPS = [
         {
           label: 'Anthropic',
@@ -232,6 +239,20 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /** Like {@link numberField}, but 0 is meaningful: it disables the deadline. */
+      function nonNegativeNumberField(field) {
+        return {
+          field,
+          format: (value) => (typeof value === 'number' ? String(value) : ''),
+          parse: (text) => {
+            const trimmed = String(text ?? '').trim()
+            if (trimmed === '') return { kind: 'clear' }
+            const parsed = Number(trimmed)
+            return Number.isInteger(parsed) && parsed >= 0 ? { kind: 'set', value: parsed } : undefined
+          },
+        }
+      }
+
       function selectField(field, options) {
         return {
           field,
@@ -257,6 +278,8 @@ window.__ModuleLoader__.load({
             textField('model'),
             numberField('maxTokens'),
             selectField('searchRecency', RECENCY_OPTIONS),
+            nonNegativeNumberField('softTimeoutMs'),
+            selectField('fallbackPreset', FALLBACK_PRESET_OPTIONS),
           ].map((spec) => [spec.field, spec]))
           this.staged = new Map()
           this.listeners = new Set()
@@ -294,6 +317,8 @@ window.__ModuleLoader__.load({
             model: this.field('model'),
             maxTokens: this.field('maxTokens'),
             searchRecency: this.field('searchRecency'),
+            softTimeoutMs: this.field('softTimeoutMs'),
+            fallbackPreset: this.field('fallbackPreset'),
             apiKeyText: this.staged.get('apiKey')?.text ?? '',
             apiKeyConfigured: this.credential.configured,
             apiKeyWritable: this.credential.writable,
@@ -562,6 +587,16 @@ window.__ModuleLoader__.load({
             h(Field, { label: 'Max tokens', field: 'maxTokens', state: state.maxTokens, disabled, edit: props.edit, placeholder: '1024' }),
             state.apiMode.text === 'sonar'
               ? h(SelectField, { label: 'Search recency', field: 'searchRecency', state: state.searchRecency, disabled, edit: props.edit, options: RECENCY_OPTIONS })
+              : null,
+            isAgent
+              ? h('div', null,
+                h(Field, { label: 'Soft deadline (ms)', field: 'softTimeoutMs', state: state.softTimeoutMs, disabled, edit: props.edit, placeholder: '25000' }),
+                h(SelectField, { label: 'Fallback preset', field: 'fallbackPreset', state: state.fallbackPreset, disabled, edit: props.edit, options: FALLBACK_PRESET_OPTIONS }),
+                h('div', { style: styles.note },
+                  'When an agent search passes the soft deadline it retries once on this preset and labels the '
+                  + 'shallower answer instead of letting the outer tool call time out. 0 disables it. Keep '
+                  + 'soft deadline + 15s below the web_search tool budget.'),
+              )
               : null,
             h(SecretField, { state, disabled, edit: props.edit }),
             h('div', { style: styles.row },

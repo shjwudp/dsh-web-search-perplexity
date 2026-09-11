@@ -66,6 +66,8 @@ tools remain the standard `web_search` / `web_fetch` from `dsh-tool-web`.
 | `model` | `sonar` | `sonar` / `sonar-pro` / `sonar-reasoning-pro` / `sonar-deep-research` in Sonar mode; any Agent API model id (e.g. `openai/gpt-5.6-luna`) in Agent mode |
 | `maxTokens` | `1024` | `max_tokens` (Sonar mode) or `max_output_tokens` (Agent mode) for the generated answer |
 | `searchRecency` | unset | Sonar-mode only: `day`, `week`, `month`, or `year` |
+| `softTimeoutMs` | `25000` | Agent mode only: soft deadline (ms) for one search before one degraded retry. `0` disables it. |
+| `fallbackPreset` | `fast` | Agent mode only: preset used for the single degraded retry (any preset except `wide-research`) |
 
 > **Sonar deprecation note**: Perplexity's Sonar Chat Completions API is
 > deprecated and will be supported until **September 27, 2026**; the
@@ -87,8 +89,43 @@ environment variable are the intended key sources.
   shows a collapsible, editable `Perplexity web search` card for the
   `web-search-perplexity` settings namespace. It edits `baseURL`, `apiMode`,
   `preset` (Agent mode), `model` (Sonar or Agent API model dropdowns),
-  `maxTokens`, `searchRecency` (Sonar mode only), and the API key (write-only
-  secret field).
+  `maxTokens`, `searchRecency` (Sonar mode only), the Agent-mode soft deadline
+  and its fallback preset, and the API key (write-only secret field).
+
+## Timeouts and latency
+
+`web_search` runs under a harness deadline (`dsh-tool-web`'s
+`searchTimeoutMs`), and the Perplexity Agent API preset decides how long a
+search actually takes. Measured against the Agent API from an ordinary desktop
+connection:
+
+| preset | measured latency |
+|---|---|
+| `fast` | ~4 s |
+| `low` | ~5 s |
+| `medium` | ~25 s for a narrow query, >180 s for a broad one |
+| `wide-research` | minutes; an asynchronous workflow, not a synchronous search |
+
+A broad query on `medium` therefore outlives a 60 s tool budget. Two guards:
+
+1. **Soft deadline (this plugin).** In Agent mode, `softTimeoutMs` (default
+   `25000`) bounds one request. When it expires the provider makes exactly one
+   bounded retry on `fallbackPreset` (default `fast`) and returns that answer
+   with a leading `(Degraded result: ...)` note. Worst case is about
+   `softTimeoutMs` + 15 s, so keep that sum below the tool budget. Set
+   `softTimeoutMs: 0` to restore the original single-request behavior. The
+   retry is synchronous: no background request, no pending-task table, and no
+   promise outliving the tool call.
+2. **The tool budget lives in the agent preset.** A session's model-facing
+   `tool-web` row is supplied by the agent preset that session joins, so raising
+   `searchTimeoutMs` in the profile patch alone does not change the deadline a
+   preset-composed session enforces. Copy the shipped composition to
+   `$DSH_HOME/.agent-presets/<id>/agent.cordis.yml`, change
+   `tool-web.searchTimeoutMs` there, and select that preset.
+
+When both attempts exceed their budgets, the provider raises a `WebError` that
+names the soft deadline and suggests a narrower query, instead of letting the
+caller see only the harness's opaque `tool call timed out after <ms>ms`.
 
 ## Response mapping
 
@@ -104,8 +141,14 @@ HTTP redirects are rejected. Failures surface as `WebError` with
 
 ```bash
 npm run check        # syntax-check the host, client, and generated skill module
+npm test             # stubbed-fetch tests for the soft deadline and degraded retry
 npm run build:skill  # regenerate src/skill.js from the markdown skill source
 ```
+
+`npm test` stubs `globalThis.fetch`, so it never touches the network. It loads
+the host module from an installed DSH profile by default (the `schemastery` and
+`dsh-web` peers are not installed in a plain checkout); set
+`PPLX_PLUGIN_ENTRY` to test a different built copy.
 
 The embedded `perplexity-research` skill is authored as plain markdown at
 `skills/perplexity-research/SKILL.md`. `src/skill.js` is generated

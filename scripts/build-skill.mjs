@@ -18,16 +18,15 @@ const sourcePath = resolve(root, 'skills/perplexity-research/SKILL.md')
 const targetPath = resolve(root, 'src/skill.js')
 
 const text = readFileSync(sourcePath, 'utf8')
-if (!text.startsWith('---\n')) {
+// Tolerate CRLF working trees: the canonical source is LF in the git index,
+// but a Windows checkout with core.autocrlf=true hands us CRLF.
+const frontmatterMatch = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n?/.exec(text)
+if (frontmatterMatch === null) {
   throw new Error(`${sourcePath} must start with YAML frontmatter (---)`)
-}
-const end = text.indexOf('\n---', 3)
-if (end === -1) {
-  throw new Error(`${sourcePath} has no closing --- for the frontmatter`)
 }
 
 const frontmatter = {}
-for (const line of text.slice(3, end).split(/\r?\n/)) {
+for (const line of frontmatterMatch[1].split(/\r?\n/)) {
   const idx = line.indexOf(':')
   if (idx <= 0) continue
   const key = line.slice(0, idx).trim()
@@ -45,7 +44,7 @@ if (typeof frontmatter.description !== 'string' || frontmatter.description.lengt
   throw new Error('skill frontmatter must contain a non-empty description')
 }
 
-const content = text.slice(end + 4).trimEnd() + '\n'
+const content = text.slice(frontmatterMatch[0].length).replace(/\r\n/g, '\n').trimEnd() + '\n'
 const generated = [
   '/** Generated from skills/perplexity-research/SKILL.md — do not edit by hand.',
   ' * Regenerate with: npm run build:skill',

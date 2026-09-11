@@ -45,6 +45,46 @@ or edit content already provided in the conversation or repository.
 8. Distinguish source-backed facts, engineering inference, and unresolved
    uncertainty in the final response.
 
+## Tool budget, presets, and timeouts
+
+`web_search` runs under a harness deadline (`dsh-tool-web`'s
+`searchTimeoutMs`; a session's **agent preset** supplies that row, commonly
+60000 ms). The Perplexity **Agent API** preset trades depth for latency, so
+query breadth decides whether a call fits. Measured against the Agent API:
+
+| preset | measured latency |
+| --- | --- |
+| `fast` | ~4 s |
+| `low` | ~5 s |
+| `medium` | ~25 s for a narrow query, >180 s for a broad one |
+| `high` / `xhigh` | slower still |
+| `wide-research` | minutes; an asynchronous workflow, not a synchronous search |
+
+Discipline that keeps research inside the budget:
+
+1. Send one narrow, single-fact query per call. Never send a broad multi-part
+   question: breadth, not the number of sources, is what blows the budget.
+2. A multi-query call runs its queries in parallel but **fails fast** — the
+   slowest query sets the batch latency, and one failure aborts its siblings.
+   Prefer several narrow calls over one wide batch.
+3. On `Error: tool call timed out after <ms>ms`, do **not** repeat the same
+   broad query. Narrow it, or drop the preset for that query
+   (`medium` → `low` → `fast`), and say which one was used.
+4. A result whose content starts with `(Degraded result: ...)` means the soft
+   deadline fired and a faster preset answered. Treat it as a shallower source:
+   re-verify material claims or re-ask narrowly instead of citing it as
+   full-depth research.
+5. If the backend is unreachable or repeatedly over budget, fall back to
+   `web_fetch` on a URL you already know, or to another configured provider,
+   rather than retrying the same timed-out call.
+
+The plugin's `web-search-perplexity` settings govern this: `softTimeoutMs`
+(default 25000; `0` disables the deadline) and `fallbackPreset` (default
+`fast`). Keep `softTimeoutMs` + 15 s below the tool budget. To change the budget
+itself, edit the **agent preset**, not the profile patch: the preset supplies
+the model-facing `tool-web` row, so copy the shipped composition into
+`$DSH_HOME/.agent-presets/<id>/agent.cordis.yml` and select that preset.
+
 ## Batching with the Perplexity CLI
 
 If the `pplx` CLI is installed (check with `bash -lc "command -v pplx"`), prefer

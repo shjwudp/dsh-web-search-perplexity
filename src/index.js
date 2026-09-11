@@ -8,12 +8,20 @@
  *
  * Configuration is exposed through the durable `web-search-perplexity`
  * settings namespace, so the web UI's Plugins settings can edit baseURL,
- * model, maxTokens, searchRecency, and the API key (the key is stored through
- * the credentials domain, never in the settings file).
+ * model, maxTokens, searchRecency, the soft deadline and its fallback preset,
+ * and the API key (the key is stored through the credentials domain, never in
+ * the settings file).
  *
  * This plugin does NOT depend on `@deepseek-ai/dsh-environment` (which is not
  * published on the npm registry). As a fallback it still reads the
  * `PERPLEXITY_API_KEY` process environment variable.
+ *
+ * Agent-mode searches run under an optional soft deadline (`softTimeoutMs`).
+ * When it expires, the provider makes exactly one bounded degraded retry on a
+ * faster preset and labels that answer, so a slow deep-research query degrades
+ * instead of surfacing the harness's opaque `tool call timed out` result. The
+ * retry stays synchronous inside the caller's budget: no background request, no
+ * pending-task table, and no promise outliving the tool call.
  */
 
 import z from '@deepseek-ai/schemastery'
@@ -33,6 +41,16 @@ const API_MODES = ['sonar', 'agent']
 const AGENT_PRESETS = ['fast', 'low', 'medium', 'high', 'xhigh', 'wide-research']
 const AGENT_DEFAULT_MODEL = 'openai/gpt-5.6-luna'
 const USER_AGENT = 'dsh-web-search-perplexity/0.1.1'
+/**
+ * Default soft deadline for one Agent-mode request. Chosen so that the deadline
+ * plus the bounded degraded retry stay inside the 60s `web_search` tool budget
+ * a DSH agent preset declares (measured: `fast` ≈ 4s, `low` ≈ 5s, `medium` 25s
+ * narrow to >180s broad).
+ */
+const DEFAULT_SOFT_TIMEOUT_MS = 25_000
+const DEFAULT_FALLBACK_PRESET = 'fast'
+/** Hard cap for the single degraded retry, so the retry cannot overrun the budget. */
+const FALLBACK_TIMEOUT_MS = 15_000
 
 const SEARCH_RECENCY_VALUES = ['day', 'week', 'month', 'year']
 
@@ -46,6 +64,8 @@ const Config = z.object({
   model: z.string().default(DEFAULT_MODEL),
   maxTokens: z.number().step(1).min(1).default(DEFAULT_MAX_TOKENS),
   searchRecency: z.string().default(''),
+  softTimeoutMs: z.number().step(1).min(0).default(DEFAULT_SOFT_TIMEOUT_MS),
+  fallbackPreset: z.string().default(DEFAULT_FALLBACK_PRESET),
 })
 
 function canParseURL(value) {
@@ -164,6 +184,15 @@ function resolveOptions(ctx, config) {
     model,
     maxTokens: Number.isInteger(c.maxTokens) && c.maxTokens > 0 ? c.maxTokens : DEFAULT_MAX_TOKENS,
     searchRecency: SEARCH_RECENCY_VALUES.includes(c.searchRecency) ? c.searchRecency : undefined,
+    // 0 disables the soft deadline, restoring the single-request behavior.
+    softTimeoutMs: Number.isInteger(c.softTimeoutMs) && c.softTimeoutMs >= 0
+      ? c.softTimeoutMs
+      : DEFAULT_SOFT_TIMEOUT_MS,
+    // Only a fast synchronous preset is a useful degraded retry: `wide-research`
+    // is a minutes-long background workflow by design, not a latency fallback.
+    fallbackPreset: AGENT_PRESETS.includes(c.fallbackPreset) && c.fallbackPreset !== 'wide-research'
+      ? c.fallbackPreset
+      : DEFAULT_FALLBACK_PRESET,
     async resolveApiKey() {
       if (literalApiKey !== undefined) return literalApiKey
       const credentials = ctx.get('credentials')
@@ -207,6 +236,80 @@ function sleep(ms, signal) {
       signal.addEventListener('abort', onAbort, { once: true })
     }
   })
+}
+
+/** Abort reason marking OUR soft deadline, distinct from an outer cancellation. */
+const SOFT_DEADLINE = 'PERPLEXITY_SOFT_DEADLINE'
+
+/**
+ * Arm a soft deadline over the caller's signal.
+ *
+ * The returned signal aborts when either the outer signal aborts (a harness
+ * tool-budget cancellation) or this timer expires. `expired()` separates the
+ * two, and that distinction is what makes a degraded retry safe: only our own
+ * timer may trigger one, because an outer cancellation means no budget is left
+ * to retry inside.
+ *
+ * @param outerSignal - the signal the web seam forwarded, when it forwarded one.
+ * @param ms - the soft budget in milliseconds.
+ * @returns the derived signal, an expiry test, and a disarm function.
+ */
+function softDeadline(outerSignal, ms) {
+  const controller = new AbortController()
+  const onOuterAbort = () => controller.abort(outerSignal.reason)
+  if (outerSignal !== undefined) {
+    if (outerSignal.aborted) controller.abort(outerSignal.reason)
+    else outerSignal.addEventListener('abort', onOuterAbort, { once: true })
+  }
+  // The timer is deliberately NOT unref'd: it is the mechanism that bounds the
+  // request, so it must be able to fire even when nothing else holds the event
+  // loop open. Every caller clears it in a `finally`, so it cannot outlive the
+  // search that armed it.
+  const timer = setTimeout(() => controller.abort(SOFT_DEADLINE), ms)
+  return {
+    signal: controller.signal,
+    expired: () => controller.signal.aborted && controller.signal.reason === SOFT_DEADLINE,
+    clear: () => {
+      clearTimeout(timer)
+      if (outerSignal !== undefined) outerSignal.removeEventListener('abort', onOuterAbort)
+    },
+  }
+}
+
+/** Build the Agent API request body for one preset. */
+function agentRequestBody(request, options, preset) {
+  const body = {
+    input: request.query,
+    tools: [{ type: 'web_search' }],
+    ...(Number.isInteger(options.maxTokens) && options.maxTokens > 0
+      ? { max_output_tokens: options.maxTokens }
+      : {}),
+  }
+  if (preset !== '') {
+    body.preset = preset
+    // With a preset, `model` is optional and only sent as an explicit override
+    // when the user explicitly configured a `provider/model` slug.
+    if (options.agentModelOverride !== undefined) body.model = options.agentModelOverride
+  } else {
+    body.model = options.model
+  }
+  return body
+}
+
+/**
+ * Label a fallback answer as degraded, so neither the model nor the user can
+ * mistake a shallow retry for the full-depth result that was requested.
+ */
+function degradedAgentResult(data, options) {
+  const mapped = mapAgentResponse(data)
+  const note = `(Degraded result: the "${options.preset}" agent search passed its `
+    + `${Math.round(options.softTimeoutMs / 1000)}s soft deadline, so this answer was retried with the `
+    + `"${options.fallbackPreset}" preset and is shallower than requested. Narrow the query, or raise `
+    + 'web-search-perplexity.softTimeoutMs together with the web_search tool budget.)'
+  return {
+    ...mapped,
+    content: mapped.content !== undefined ? `${note}\n\n${mapped.content}` : note,
+  }
 }
 
 /** POST one Perplexity JSON request and return the parsed response body. */
@@ -332,23 +435,52 @@ export function apply(ctx, config = {}) {
       }
 
       if (options.apiMode === 'agent') {
-        const agentBody = {
-          input: request.query,
-          tools: [{ type: 'web_search' }],
-          ...(Number.isInteger(options.maxTokens) && options.maxTokens > 0
-            ? { max_output_tokens: options.maxTokens }
-            : {}),
+        const url = `${options.baseURL}/v1/agent`
+
+        // No soft deadline configured: one request, exactly as before.
+        if (!(options.softTimeoutMs > 0)) {
+          const data = await requestJson(url, apiKey, agentRequestBody(request, options, options.preset), signal)
+          return mapAgentResponse(data)
         }
-        if (options.preset !== '') {
-          agentBody.preset = options.preset
-          // With a preset, `model` is optional and only sent as an override
-          // when the user explicitly configured a `provider/model` slug.
-          if (options.agentModelOverride !== undefined) agentBody.model = options.agentModelOverride
-        } else {
-          agentBody.model = options.model
+
+        const primary = softDeadline(signal, options.softTimeoutMs)
+        let primaryData
+        let softTimedOut = false
+        try {
+          primaryData = await requestJson(
+            url, apiKey, agentRequestBody(request, options, options.preset), primary.signal)
+        } catch (error) {
+          // Only OUR deadline may degrade the answer. An outer cancellation is
+          // the harness tool budget: no time is left for a retry. Any other
+          // error is a real provider failure, not a latency problem.
+          if (!primary.expired() || (signal !== undefined && signal.aborted)) throw error
+          softTimedOut = true
+        } finally {
+          primary.clear()
         }
-        const data = await requestJson(`${options.baseURL}/v1/agent`, apiKey, agentBody, signal)
-        return mapAgentResponse(data)
+        if (!softTimedOut) return mapAgentResponse(primaryData)
+
+        // Degraded retry: a shallow answer inside the budget beats the opaque
+        // `tool call timed out` result the caller would otherwise receive.
+        const fallback = softDeadline(signal, FALLBACK_TIMEOUT_MS)
+        try {
+          const data = await requestJson(
+            url, apiKey, agentRequestBody(request, options, options.fallbackPreset), fallback.signal, 1)
+          return degradedAgentResult(data, options)
+        } catch (error) {
+          if (fallback.expired() && !(signal !== undefined && signal.aborted)) {
+            throw new WebError(
+              `Perplexity agent search passed its ${Math.round(options.softTimeoutMs / 1000)}s soft deadline, and the `
+              + `"${options.fallbackPreset}" fallback did not finish within `
+              + `${Math.round(FALLBACK_TIMEOUT_MS / 1000)}s. Retry with a narrower, single-fact query, or set `
+              + `web-search-perplexity.preset to "${options.fallbackPreset}" — raise softTimeoutMs together with `
+              + 'the web_search tool budget if full-depth research is required.',
+              'WEB_PROVIDER_ERROR', { cause: error })
+          }
+          throw error
+        } finally {
+          fallback.clear()
+        }
       }
 
       const data = await requestJson(
