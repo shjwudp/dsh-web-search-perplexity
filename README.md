@@ -201,6 +201,7 @@ HTTP redirects are rejected. Failures surface as `WebError` with
 npm run check        # syntax-check the host, client, and generated skill module
 npm test             # stubbed-fetch host tests, then the settings card's locale dictionaries
 npm run build:skill  # regenerate src/skill.js from the markdown skill source
+npm run sync:profile # copy this working tree into every DSH profile that depends on it
 ```
 
 `npm test` runs two suites. `test/soft-deadline.test.mjs` stubs
@@ -210,6 +211,35 @@ are not installed in a plain checkout), so set `PPLX_PLUGIN_ENTRY` to test a
 different built copy. `test/client-locale.test.mjs` stubs
 `window.__ModuleLoader__` and drives the real browser half, checking that the
 `zh`/`en` dictionaries stay complete and that `apply` registers them.
+
+### Installing this checkout into a profile while developing
+
+A `file:` dependency is not reliably live. pnpm may hardlink the package into the
+profile, in which case an in-place edit propagates — but an editor that writes by
+replacing a file (temp file plus rename) breaks that link, and the installed copy
+then silently goes stale. `pnpm add file:<repo>` does not help afterwards: once
+the specifier and lockfile entry match, it is a no-op and does not refresh
+contents.
+
+So after changing `src/`, run:
+
+```bash
+npm run sync:profile                 # every profile depending on this package
+npm run sync:profile -- web          # one profile, by name or directory path
+```
+
+It copies the published file set into each profile's `node_modules`, then imports
+the installed package the way DSH does and compares hashes, so a broken peer
+resolution or a stale copy fails the command instead of surfacing at the next DSH
+start. Set `DSH_PROFILES_DIR` to override the profile root (default
+`$DSH_HOME/profiles`, then `~/.dsh/profiles`).
+
+`link:` is not an alternative: a symlink makes the plugin resolve from this
+repository, where `@deepseek-ai/schemastery` and `@deepseek-ai/dsh-web` cannot be
+found, and it fails to load with `ERR_MODULE_NOT_FOUND`.
+
+A change to `src/index.js` needs a DSH restart, because the host half is loaded
+per process. `src/client.js` is re-served to the browser, so a reload is enough.
 
 ### Localization
 
