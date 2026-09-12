@@ -51,7 +51,7 @@ const API_MODES = ['sonar', 'agent']
 const AGENT_PRESETS = ['fast', 'low', 'medium', 'high', 'xhigh', 'wide-research']
 const AGENT_DEFAULT_MODEL = 'openai/gpt-5.6-luna'
 // Keep in sync with `version` in package.json.
-const USER_AGENT = 'dsh-web-search-perplexity/0.1.4'
+const USER_AGENT = 'dsh-web-search-perplexity/0.1.5'
 /**
  * `web_search`'s budget under the shipped DSH agent presets: the `tool-web` row
  * of `@deepseek-ai/dsh-agent-presets` sets `searchTimeoutMs: 60000`

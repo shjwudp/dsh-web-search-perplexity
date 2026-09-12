@@ -13,18 +13,30 @@ dependencies.
 
 ## Compatibility
 
-- Tested with **DSH 0.1.2-rc.1** (`@deepseek-ai/dsh-web` 0.1.2-rc.1)
-- Peer dependency: `@deepseek-ai/dsh-web: ^0.1.2-rc.1`
+- Tested with **DSH 0.1.5-rc.2** (`@deepseek-ai/dsh-web` 0.1.5-rc.2,
+  `@deepseek-ai/schemastery` 3.18.2)
+- Peer dependencies: `@deepseek-ai/dsh-web: ^0.1.2-rc.1`,
+  `@deepseek-ai/schemastery: ^3.18.1-rc.1`. The declared range is unchanged and
+  its lower bound is where this plugin was first written, so an older 0.1.2-rc.x
+  host satisfies it too.
 - Requires a DSH profile with the `ctx.web` seam mounted and the model-facing
   tools `web_search` / `web_fetch` enabled (`dsh-tool-web`). In the `web`
   profile, `dsh-tool-web` is disabled by the web-app layer by default; enable
   it with `- id: tool-web, disabled: false` in the profile patch.
 - Node ≥ 18
+- The settings card's translations are registered through the client locale
+  service (`ctx.locale.register`, `@deepseek-ai/dsh-client-locale`). On a host
+  without that service the card falls back to English instead of failing, so the
+  plugin stays usable but untranslated.
+- `web_search` applies its own tool budget (`dsh-tool-web`'s `searchTimeoutMs`,
+  30000 by default, 60000 under the shipped agent presets). The soft deadline
+  and its degraded retry are derived to stay inside it — see
+  [Timeouts and latency](#timeouts-and-latency).
 
 ## Install
 
 ```bash
-dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.2
+dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.5
 ```
 
 Then tell the web seam to use the Perplexity provider in

@@ -1,6 +1,6 @@
 {
   "name": "@shjwudp/dsh-web-search-perplexity",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Standalone Perplexity search provider for the DeepSeek Harness web seam (ctx.web). No internal-only dependencies; reads PERPLEXITY_API_KEY from the environment.",
   "type": "module",
   "main": "src/index.js",
