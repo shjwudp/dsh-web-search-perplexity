@@ -24,7 +24,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { cpSync, existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { cpSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -119,10 +119,31 @@ function copyIntoProfile(profileDir) {
       rmSync(destination, { force: true })
       cpSync(source, destination)
     }
+    syncInstalledVersion(installedRoot)
   } catch (error) {
     return `copy failed: ${error.message}`
   }
   return undefined
+}
+
+/**
+ * Bring the installed manifest's `version` in line with this repository.
+ *
+ * Only that one field is touched. The installed manifest is pnpm's own copy, and
+ * the `dsh` block DSH reads (`bundle.patch` and `client`) is written by pnpm at
+ * install time; rewriting the whole file would discard whatever else it carries.
+ * pnpm treats a `file:` dependency as already installed once the specifier and
+ * lockfile entry match, so it will not refresh this itself.
+ *
+ * @param installedRoot - the installed package root.
+ */
+function syncInstalledVersion(installedRoot) {
+  const manifestPath = join(installedRoot, 'package.json')
+  if (!existsSync(manifestPath)) return
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  if (manifest.version === repoManifest.version) return
+  manifest.version = repoManifest.version
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 }
 
 /**
