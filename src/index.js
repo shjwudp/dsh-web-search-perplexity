@@ -68,13 +68,18 @@ export const FALLBACK_TIMEOUT_MS = 15_000
 /** Headroom kept between the worst case (`soft + fallback`) and the tool budget. */
 export const SOFT_DEADLINE_MARGIN_MS = 5_000
 /**
+ * Headroom kept between the worst case (`soft + fallback`) and the 30s component
+ * budget, for the fast presets that must also fit under it.
+ */
+export const FAST_DEADLINE_MARGIN_MS = 3_000
+/**
  * Ceiling for a soft deadline. Derived, not chosen: a deadline above this would
  * leave the degraded retry no room inside the 60s preset budget, so the retry
  * could not run at all and the caller would get an opaque timeout instead.
  */
 export const MAX_SOFT_TIMEOUT_MS = TOOL_BUDGET_MS - FALLBACK_TIMEOUT_MS - SOFT_DEADLINE_MARGIN_MS
 /** Deadline for the presets fast enough to also fit the 30s component budget. */
-export const FAST_PRESET_SOFT_TIMEOUT_MS = COMPONENT_TOOL_BUDGET_MS - FALLBACK_TIMEOUT_MS - 3_000
+export const FAST_PRESET_SOFT_TIMEOUT_MS = COMPONENT_TOOL_BUDGET_MS - FALLBACK_TIMEOUT_MS - FAST_DEADLINE_MARGIN_MS
 
 /**
  * Soft deadline per Agent preset, derived from that preset's measured latency
@@ -316,13 +321,24 @@ function retryAfterMs(header) {
 
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
+    let timer
     const onAbort = () => {
+      // `undefined` before the timer exists, and `clearTimeout(undefined)` is a
+      // no-op, so the already-aborted path below can share this handler.
       clearTimeout(timer)
       const error = new Error('aborted')
       error.name = 'AbortError'
       reject(error)
     }
-    const timer = setTimeout(() => {
+    // A signal that is already aborted never fires `abort` again, so without this
+    // check the caller would wait out the full backoff and only then learn it had
+    // been cancelled — the 429 path can pass an already-aborted signal when the
+    // soft deadline expires just as a retry begins.
+    if (signal !== undefined && signal.aborted) {
+      onAbort()
+      return
+    }
+    timer = setTimeout(() => {
       if (signal !== undefined) signal.removeEventListener('abort', onAbort)
       resolve()
     }, ms)

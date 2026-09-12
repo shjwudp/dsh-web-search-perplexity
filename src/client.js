@@ -22,8 +22,114 @@ window.__ModuleLoader__.load({
       const NS = 'web-search-perplexity'
       const DEFAULT_API_KEY_REF = 'PERPLEXITY_API_KEY'
       const AGENT_DEFAULT_MODEL = 'openai/gpt-5.6-luna'
+      /**
+       * UI copy for the settings card. `zh` is complete and `en` mirrors it, as
+       * `ctx.locale.register` requires every shipped locale for a namespace.
+       * Values that are themselves identifiers (`sonar-pro`, preset names, model
+       * ids) stay literal in the option tables and are not dictionary entries.
+       */
+      const DICTS = {
+        zh: {
+          'card.title': 'Perplexity 网络搜索',
+          'card.subtitle': 'ctx.web 的独立 Perplexity 搜索提供方（id: perplexity）。',
+          'card.unsaved': '有未保存的修改',
+          'field.baseURL': '接入地址（baseURL）',
+          'field.apiMode': 'API 模式',
+          'field.preset': '预设',
+          'field.model': '模型',
+          'field.maxTokens': '最大 token 数',
+          'field.searchRecency': '搜索时效',
+          'field.softTimeoutMs': '软截止时间（毫秒）',
+          'field.fallbackPreset': '降级预设',
+          'field.apiKey': 'API 密钥',
+          'recency.none': '默认（不限）',
+          'mode.sonar': 'Sonar Chat Completions',
+          'mode.agent': 'Agent API',
+          'preset.none': '无（手动选择模型）',
+          'preset.fast': 'fast — 单事实检索',
+          'preset.low': 'low — 日常研究',
+          'preset.medium': 'medium — 多跳浏览',
+          'preset.high': 'high — 穷尽覆盖',
+          'preset.xhigh': 'xhigh — 开放式自主研究',
+          'preset.wide-research': 'wide-research — 大规模资料收集',
+          'group.anthropic': 'Anthropic',
+          'group.openai': 'OpenAI',
+          'group.google': 'Google',
+          'group.xai': 'xAI',
+          'group.other': 'Perplexity 及其他',
+          'note.presetModel': '模型由「{preset}」预设管理。',
+          'note.softDeadline': '留空则按预设推导截止时间（fast/low 为 12000；medium 及更慢为 40000）。'
+            + '当 agent 搜索超过该时间，提供方会用降级预设重试一次并标注该结果较浅，'
+            + '而不是让外层工具调用直接超时：内容以 [DEGRADED] 加 JSON 开头，结果中也带有 degradation 字段。'
+            + '填 0 表示关闭。请让「截止时间 + 15 秒」低于 web_search 的工具预算'
+            + '（随附 agent 预设为 60000；dsh-tool-web 组件默认为 30000）。',
+          'placeholder.presetDefault': '预设默认值',
+          'placeholder.maxTokens': '1024',
+          'select.current': '选择…',
+          'apiKey.notConfigured': '未配置',
+          'apiKey.configured': '已配置',
+          'apiKey.placeholderStored': '留空则保留当前密钥',
+          'apiKey.noteStored': '存储在设置文件之外，从不回显。',
+          'status.invalid': '取值无效',
+          'action.save': '保存',
+          'action.saving': '保存中…',
+          'action.discard': '放弃修改',
+          'status.saveFailed': '保存失败；草稿已保留。',
+        },
+        en: {
+          'card.title': 'Perplexity web search',
+          'card.subtitle': 'Standalone Perplexity provider for ctx.web (id: perplexity).',
+          'card.unsaved': 'Unsaved changes',
+          'field.baseURL': 'Endpoint (baseURL)',
+          'field.apiMode': 'API mode',
+          'field.preset': 'Preset',
+          'field.model': 'Model',
+          'field.maxTokens': 'Max tokens',
+          'field.searchRecency': 'Search recency',
+          'field.softTimeoutMs': 'Soft deadline (ms)',
+          'field.fallbackPreset': 'Fallback preset',
+          'field.apiKey': 'API key',
+          'recency.none': 'Default (none)',
+          'mode.sonar': 'Sonar Chat Completions',
+          'mode.agent': 'Agent API',
+          'preset.none': 'None (choose model manually)',
+          'preset.fast': 'fast — single-fact lookups',
+          'preset.low': 'low — everyday research',
+          'preset.medium': 'medium — multi-hop browsing',
+          'preset.high': 'high — exhaustive coverage',
+          'preset.xhigh': 'xhigh — open-ended agentic',
+          'preset.wide-research': 'wide-research — large collections',
+          'group.anthropic': 'Anthropic',
+          'group.openai': 'OpenAI',
+          'group.google': 'Google',
+          'group.xai': 'xAI',
+          'group.other': 'Perplexity & others',
+          'note.presetModel': 'Model is managed by the "{preset}" preset.',
+          'note.softDeadline': 'Leave blank to derive the deadline from the preset (fast/low 12000; medium and '
+            + 'slower 40000). When an agent search passes it the provider retries once on the fallback preset and '
+            + 'marks the shallower answer instead of letting the outer tool call time out: the content starts with '
+            + '[DEGRADED] plus JSON, and the result carries a degradation field. 0 disables it. Keep the deadline + '
+            + '15s below the web_search tool budget (60000 under the shipped agent presets; the dsh-tool-web '
+            + 'component default is 30000).',
+          'placeholder.presetDefault': 'preset default',
+          'placeholder.maxTokens': '1024',
+          'select.current': 'Select…',
+          'apiKey.notConfigured': 'Not configured',
+          'apiKey.configured': 'Configured',
+          'apiKey.placeholderStored': 'Leave blank to keep the current key',
+          'apiKey.noteStored': 'Stored outside the settings file; never echoed back.',
+          'status.invalid': 'Invalid value',
+          'action.save': 'Save',
+          'action.saving': 'Saving…',
+          'action.discard': 'Discard',
+          'status.saveFailed': 'Save failed; drafts kept.',
+        },
+      }
+      /** English copy, used verbatim when the locale service is unavailable. */
+      const EN = DICTS.en
+      /** Option tables carry translation keys; the card resolves them at render. */
       const RECENCY_OPTIONS = [
-        { value: '', label: 'Default (none)' },
+        { value: '', labelKey: 'recency.none' },
         { value: 'day', label: 'day' },
         { value: 'week', label: 'week' },
         { value: 'month', label: 'month' },
@@ -36,17 +142,17 @@ window.__ModuleLoader__.load({
         { value: 'sonar-deep-research', label: 'sonar-deep-research' },
       ]
       const API_MODE_OPTIONS = [
-        { value: 'sonar', label: 'Sonar Chat Completions' },
-        { value: 'agent', label: 'Agent API' },
+        { value: 'sonar', labelKey: 'mode.sonar' },
+        { value: 'agent', labelKey: 'mode.agent' },
       ]
       const PRESET_OPTIONS = [
-        { value: '', label: 'None (choose model manually)' },
-        { value: 'fast', label: 'fast — single-fact lookups' },
-        { value: 'low', label: 'low — everyday research' },
-        { value: 'medium', label: 'medium — multi-hop browsing' },
-        { value: 'high', label: 'high — exhaustive coverage' },
-        { value: 'xhigh', label: 'xhigh — open-ended agentic' },
-        { value: 'wide-research', label: 'wide-research — large collections' },
+        { value: '', labelKey: 'preset.none' },
+        { value: 'fast', labelKey: 'preset.fast' },
+        { value: 'low', labelKey: 'preset.low' },
+        { value: 'medium', labelKey: 'preset.medium' },
+        { value: 'high', labelKey: 'preset.high' },
+        { value: 'xhigh', labelKey: 'preset.xhigh' },
+        { value: 'wide-research', labelKey: 'preset.wide-research' },
       ]
       /**
        * Presets usable as a degraded retry. `wide-research` is excluded: it is a
@@ -55,9 +161,15 @@ window.__ModuleLoader__.load({
       const FALLBACK_PRESET_OPTIONS = PRESET_OPTIONS.filter(
         (option) => option.value !== '' && option.value !== 'wide-research',
       )
-      const AGENT_MODEL_GROUPS = [
+      /**
+       * Agent API models by vendor. Group headings carry `labelKey` so they
+       * follow the active locale; the model ids stay literal.
+       * @param t - translate function bound to this plugin's namespace.
+       */
+      function agentModelGroups(t) {
+        return [
         {
-          label: 'Anthropic',
+          label: t('group.anthropic'),
           options: [
             { value: 'anthropic/claude-opus-5', label: 'claude-opus-5' },
             { value: 'anthropic/claude-opus-4-8', label: 'claude-opus-4-8' },
@@ -72,7 +184,7 @@ window.__ModuleLoader__.load({
           ],
         },
         {
-          label: 'OpenAI',
+          label: t('group.openai'),
           options: [
             { value: 'openai/gpt-5.6-sol', label: 'gpt-5.6-sol' },
             { value: 'openai/gpt-5.6-terra', label: 'gpt-5.6-terra' },
@@ -88,7 +200,7 @@ window.__ModuleLoader__.load({
           ],
         },
         {
-          label: 'Google',
+          label: t('group.google'),
           options: [
             { value: 'google/gemini-3.1-pro-preview', label: 'gemini-3.1-pro-preview' },
             { value: 'google/gemini-3.1-flash-lite', label: 'gemini-3.1-flash-lite' },
@@ -100,7 +212,7 @@ window.__ModuleLoader__.load({
           ],
         },
         {
-          label: 'xAI',
+          label: t('group.xai'),
           options: [
             { value: 'xai/grok-4.6', label: 'grok-4.6' },
             { value: 'xai/grok-4.5', label: 'grok-4.5' },
@@ -111,7 +223,7 @@ window.__ModuleLoader__.load({
           ],
         },
         {
-          label: 'Perplexity & others',
+          label: t('group.other'),
           options: [
             { value: 'perplexity/sonar', label: 'perplexity/sonar' },
             { value: 'perplexity/deepseek-v4-flash-0731', label: 'deepseek-v4-flash-0731' },
@@ -123,7 +235,8 @@ window.__ModuleLoader__.load({
             { value: 'perplexity/nemotron-3-ultra-550b-a55b', label: 'nemotron-3-ultra-550b-a55b' },
           ],
         },
-      ]
+        ]
+      }
 
       const styles = {
         card: {
@@ -487,8 +600,20 @@ window.__ModuleLoader__.load({
             placeholder: props.placeholder ?? '',
             onChange: (event) => props.edit(props.field, event.target.value),
           }),
-          state.invalid ? h('span', { style: styles.error }, 'Invalid value') : null,
+          state.invalid ? h('span', { style: styles.error }, props.t('status.invalid')) : null,
         )
+      }
+
+      /**
+       * Resolve one option table entry to its display text. Entries carry either a
+       * `labelKey` for localized copy or a literal `label` for identifiers that are
+       * not translated (model ids, `day`/`week`).
+       * @param option - one entry from an option table or model group.
+       * @param t - translate function bound to this plugin's namespace.
+       * @returns the text to render for the option.
+       */
+      function optionLabel(option, t) {
+        return option.labelKey !== undefined ? t(option.labelKey) : option.label
       }
 
       function SelectField(props) {
@@ -498,7 +623,10 @@ window.__ModuleLoader__.load({
         const known = flat.some((option) => option.value === state.text)
         const withCurrent = known
           ? groups
-          : [{ label: null, options: [{ value: state.text, label: state.text === '' ? 'Select…' : state.text }] }, ...groups]
+          : [{
+            label: null,
+            options: [{ value: state.text, label: state.text === '' ? props.t('select.current') : state.text }],
+          }, ...groups]
         return h('div', { style: styles.field },
           h('label', { style: styles.label }, props.label),
           h('select', {
@@ -508,36 +636,39 @@ window.__ModuleLoader__.load({
             onChange: (event) => props.edit(props.field, event.target.value),
           },
             withCurrent.map((group) => group.label
-              ? h('optgroup', { label: group.label }, group.options.map((option) => h('option', { value: option.value }, option.label)))
-              : group.options.map((option) => h('option', { value: option.value }, option.label))),
+              ? h('optgroup', { label: group.label }, group.options.map((option) => h('option', { value: option.value }, optionLabel(option, props.t))))
+              : group.options.map((option) => h('option', { value: option.value }, optionLabel(option, props.t)))),
           ),
-          state.invalid ? h('span', { style: styles.error }, 'Invalid value') : null,
+          state.invalid ? h('span', { style: styles.error }, props.t('status.invalid')) : null,
         )
       }
 
       function SecretField(props) {
         const state = props.state
         return h('div', { style: styles.field },
-          h('label', { style: styles.label }, 'API key'),
+          h('label', { style: styles.label }, props.t('field.apiKey')),
           h('div', { style: styles.row },
             h('input', {
               style: { ...styles.input, flex: '1 1 auto' },
               type: 'password',
               value: state.apiKeyText,
               disabled: props.disabled || !state.apiKeyWritable,
-              placeholder: 'Leave blank to keep the current key',
+              placeholder: props.t('apiKey.placeholderStored'),
               autoComplete: 'off',
               onChange: (event) => props.edit('apiKey', event.target.value),
             }),
-            h('span', { style: styles.note }, state.apiKeyConfigured ? 'Configured' : 'Not configured'),
+            h('span', { style: styles.note }, state.apiKeyConfigured ? props.t('apiKey.configured') : props.t('apiKey.notConfigured')),
           ),
-          h('span', { style: styles.note }, 'Stored outside the settings file; never echoed back.'),
+          h('span', { style: styles.note }, props.t('apiKey.noteStored')),
         )
       }
 
       function PerplexityCard(props) {
         const state = props.usePerplexityCard((snapshot) => snapshot)
         const [expanded, setExpanded] = useState(false)
+        // The card's locale seat is supplied by the slot container; the English
+        // dictionary keeps the card readable if this seam ever stops forwarding it.
+        const t = typeof props.t === 'function' ? props.t : (key) => EN[key] ?? key
         const disabled = !state.available || !state.writable || state.saving
         const isAgent = state.apiMode.text === 'agent'
         const agentModelText = isAgent && !state.model.text.includes('/')
@@ -559,10 +690,10 @@ window.__ModuleLoader__.load({
             onClick: () => setExpanded(!expanded),
           },
             h('div', { style: styles.headText },
-              h('div', { style: styles.title }, 'Perplexity web search'),
-              h('div', { style: styles.dim }, 'Standalone Perplexity provider for ctx.web (id: perplexity).'),
+              h('div', { style: styles.title }, t('card.title')),
+              h('div', { style: styles.dim }, t('card.subtitle')),
               expanded ? null : h('div', { style: styles.note },
-                summary + (state.dirty ? ' · Unsaved changes' : ''),
+                summary + (state.dirty ? ` · ${t('card.unsaved')}` : ''),
               ),
             ),
             h('span', {
@@ -574,53 +705,71 @@ window.__ModuleLoader__.load({
             ),
           ),
           expanded ? h('div', { style: styles.body },
-            h(Field, { label: 'Endpoint (baseURL)', field: 'baseURL', state: state.baseURL, disabled, edit: props.edit }),
-            h(SelectField, { label: 'API mode', field: 'apiMode', state: state.apiMode, disabled, edit: props.edit, options: API_MODE_OPTIONS }),
+            h(Field, { t, label: t('field.baseURL'), field: 'baseURL', state: state.baseURL, disabled, edit: props.edit }),
+            h(SelectField, { t, label: t('field.apiMode'), field: 'apiMode', state: state.apiMode, disabled, edit: props.edit, options: API_MODE_OPTIONS }),
             state.apiMode.text === 'agent'
-              ? h(SelectField, { label: 'Preset', field: 'preset', state: state.preset, disabled, edit: props.edit, options: PRESET_OPTIONS })
+              ? h(SelectField, { t, label: t('field.preset'), field: 'preset', state: state.preset, disabled, edit: props.edit, options: PRESET_OPTIONS })
               : null,
             isAgent && state.preset.text !== ''
-              ? h('div', { style: styles.note }, `Model is managed by the "${state.preset.text}" preset.`)
+              ? h('div', { style: styles.note }, t('note.presetModel', { preset: state.preset.text }))
               : isAgent
-                ? h(SelectField, { label: 'Model', field: 'model', state: modelState, disabled, edit: props.edit, groups: AGENT_MODEL_GROUPS })
-                : h(SelectField, { label: 'Model', field: 'model', state: state.model, disabled, edit: props.edit, options: MODEL_OPTIONS }),
-            h(Field, { label: 'Max tokens', field: 'maxTokens', state: state.maxTokens, disabled, edit: props.edit, placeholder: '1024' }),
+                ? h(SelectField, { t, label: t('field.model'), field: 'model', state: modelState, disabled, edit: props.edit, groups: agentModelGroups(t) })
+                : h(SelectField, { t, label: t('field.model'), field: 'model', state: state.model, disabled, edit: props.edit, options: MODEL_OPTIONS }),
+            h(Field, { t, label: t('field.maxTokens'), field: 'maxTokens', state: state.maxTokens, disabled, edit: props.edit, placeholder: t('placeholder.maxTokens') }),
             state.apiMode.text === 'sonar'
-              ? h(SelectField, { label: 'Search recency', field: 'searchRecency', state: state.searchRecency, disabled, edit: props.edit, options: RECENCY_OPTIONS })
+              ? h(SelectField, { t, label: t('field.searchRecency'), field: 'searchRecency', state: state.searchRecency, disabled, edit: props.edit, options: RECENCY_OPTIONS })
               : null,
             isAgent
               ? h('div', null,
-                h(Field, { label: 'Soft deadline (ms)', field: 'softTimeoutMs', state: state.softTimeoutMs, disabled, edit: props.edit, placeholder: 'preset default' }),
-                h(SelectField, { label: 'Fallback preset', field: 'fallbackPreset', state: state.fallbackPreset, disabled, edit: props.edit, options: FALLBACK_PRESET_OPTIONS }),
-                h('div', { style: styles.note },
-                  'Leave blank to derive the deadline from the preset (fast/low 12000; medium and slower 40000). '
-                  + 'When an agent search passes it the provider retries once on the fallback preset and marks the '
-                  + 'shallower answer instead of letting the outer tool call time out: the content starts with '
-                  + '[DEGRADED] plus JSON, and the result carries a degradation field. 0 disables it. Keep the '
-                  + 'deadline + 15s below the web_search tool budget (60000 under the shipped agent presets; the '
-                  + 'dsh-tool-web component default is 30000).'),
+                h(Field, { t, label: t('field.softTimeoutMs'), field: 'softTimeoutMs', state: state.softTimeoutMs, disabled, edit: props.edit, placeholder: t('placeholder.presetDefault') }),
+                h(SelectField, { t, label: t('field.fallbackPreset'), field: 'fallbackPreset', state: state.fallbackPreset, disabled, edit: props.edit, options: FALLBACK_PRESET_OPTIONS }),
+                h('div', { style: styles.note }, t('note.softDeadline')),
               )
               : null,
-            h(SecretField, { state, disabled, edit: props.edit }),
+            h(SecretField, { t, state, disabled, edit: props.edit }),
             h('div', { style: styles.row },
               h('button', {
                 style: styles.buttonPrimary,
                 disabled: disabled || !state.dirty || state.invalid,
                 onClick: () => props.save(),
-              }, state.saving ? 'Saving…' : 'Save'),
+              }, state.saving ? t('action.saving') : t('action.save')),
               h('button', {
                 style: styles.button,
                 disabled: disabled || (!state.dirty && !state.failed),
                 onClick: () => props.discard(),
-              }, 'Discard'),
-              state.failed ? h('span', { style: styles.error }, 'Save failed; drafts kept.') : null,
+              }, t('action.discard')),
+              state.failed ? h('span', { style: styles.error }, t('status.saveFailed')) : null,
             ),
           ) : null,
         )
       }
 
+      /**
+       * Register this card's copy with the locale service.
+       *
+       * The card's `t` seat comes from being a locale-namespaced settings item, so
+       * this registration is what makes the card follow the active language. A
+       * missing locale service (or a registration failure) leaves the English
+       * dictionary in place rather than breaking the card, so this never throws
+       * into `apply`'s caller.
+       * @param ctx - client context, whose `locale` service may be absent.
+       */
+      function registerDictionaries(ctx) {
+        const locale = ctx.locale
+        if (locale === undefined || typeof locale.register !== 'function') return
+        const register = () => locale.register(NS, { zh: DICTS.zh, en: DICTS.en })
+        if (typeof ctx.effect === 'function') ctx.effect(register, 'web-search-perplexity: dictionaries')
+        else register()
+      }
+
       function apply(ctx) {
         if (!ctx || !ctx.slots || typeof ctx.slots.inject !== 'function') return
+
+        try {
+          registerDictionaries(ctx)
+        } catch (error) {
+          console.warn('[dsh-web-search-perplexity] locale dictionaries unavailable', error)
+        }
 
         try {
           const scope = ctx.settingsScope.bind({ namespace: NS })
@@ -628,6 +777,9 @@ window.__ModuleLoader__.load({
           ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
             name: 'settings.plugin.item',
             key: NS,
+            // Binds this card to the NS dictionary registered above, which is how
+            // the container supplies the `t` seat the card renders with.
+            locale: NS,
             inject: () => card.inject(),
           }, PerplexityCard))
         } catch (error) {
@@ -636,7 +788,7 @@ window.__ModuleLoader__.load({
       }
 
       exports.apply = apply
-      exports.inject = ['slots', 'settingsScope', 'remote.credentials']
+      exports.inject = ['slots', 'settingsScope', 'remote.credentials', 'locale']
     } catch (error) {
       console.warn('[dsh-web-search-perplexity] client init failed', error)
       exports.apply = function () {}

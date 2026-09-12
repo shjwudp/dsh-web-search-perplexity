@@ -79,6 +79,10 @@ const {
   FALLBACK_TIMEOUT_MS,
   TOOL_BUDGET_MS,
   COMPONENT_TOOL_BUDGET_MS,
+  FAST_DEADLINE_MARGIN_MS,
+  FAST_PRESET_SOFT_TIMEOUT_MS,
+  MAX_SOFT_TIMEOUT_MS,
+  SOFT_DEADLINE_MARGIN_MS,
   DEGRADED_MARKER_PREFIX,
 } = await import(MODULE)
 
@@ -264,6 +268,13 @@ const MEDIUM_TIER_MS = defaultSoftTimeoutMsFor('medium')
     `medium=${defaultSoftTimeoutMsFor('medium')}ms vs measured ${MEASURED_MEDIUM_NARROW_MS}ms`)
   check('the medium default is the derived ceiling, not an ad-hoc number',
     MEDIUM_TIER_MS === TOOL_BUDGET_MS - FALLBACK_TIMEOUT_MS - 5_000, `medium=${MEDIUM_TIER_MS}`)
+  check('the fast default is derived from its own named margin',
+    FAST_TIER_MS === COMPONENT_TOOL_BUDGET_MS - FALLBACK_TIMEOUT_MS - FAST_DEADLINE_MARGIN_MS,
+    `fast=${FAST_TIER_MS} margin=${FAST_DEADLINE_MARGIN_MS}`)
+  check('the derived tiers are the documented 12000 and 40000',
+    FAST_PRESET_SOFT_TIMEOUT_MS === 12_000 && MAX_SOFT_TIMEOUT_MS === 40_000
+      && SOFT_DEADLINE_MARGIN_MS === 5_000,
+    `fast=${FAST_PRESET_SOFT_TIMEOUT_MS} max=${MAX_SOFT_TIMEOUT_MS}`)
   check('the fast presets also fit the 30 s component budget',
     ['fast', 'low'].every((p) => defaultSoftTimeoutMsFor(p) + FALLBACK_TIMEOUT_MS <= COMPONENT_TOOL_BUDGET_MS),
     `fast=${FAST_TIER_MS} budget=${COMPONENT_TOOL_BUDGET_MS}`)
@@ -318,6 +329,58 @@ console.log('\n6. resolveOptions applies the preset default; an explicit value w
   check('0 still disables the deadline and reserves no retry budget',
     offResult.degradation?.softTimeoutMs === 0 && offResult.degradation?.fallbackTimeoutMs === 0,
     JSON.stringify(offResult.degradation))
+}
+
+// ── 7. A 429 backoff honors a signal that was already aborted when it began ────
+// `sleep` must reject immediately on an already-aborted signal. Omitting the
+// soft deadline puts the outer signal straight onto the request, so a signal
+// aborted before the call reaches the provider is forwarded as-is: the response
+// then arrives as a 429 and the backoff starts against an aborted signal. That
+// models a harness cancel landing while a 429 response is in flight, which is
+// exactly when a provider is most likely to be rate-limiting.
+//
+// A signal already aborted never fires `abort` again, so without the guard the
+// backoff runs to completion and issues another request that the caller cannot
+// use — it has already been cancelled.
+console.log('\n7. an already-aborted signal does not wait out the 429 backoff')
+{
+  const RETRY_AFTER = '0.5'
+  const RESPONSE_DELAY_MS = 40
+  const calls = []
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, body: init?.body !== undefined ? JSON.parse(init.body) : undefined })
+    await new Promise((resolve) => setTimeout(resolve, RESPONSE_DELAY_MS))
+    return {
+      ok: false,
+      status: 429,
+      headers: { get: (name) => (name.toLowerCase() === 'retry-after' ? RETRY_AFTER : null) },
+      json: async () => ({ error: 'rate limited' }),
+    }
+  }
+
+  // softTimeoutMs: 0 keeps the outer signal un-derived, so it reaches requestJson aborted.
+  const provider = makeProvider({ ...baseConfig, softTimeoutMs: 0 })
+  const outer = new AbortController()
+  outer.abort()
+  const started = Date.now()
+  let error
+  try {
+    await provider.search({ query: 'cancelled question', maxResults: 5 }, outer.signal)
+  } catch (caught) {
+    error = caught
+  }
+  const elapsed = Date.now() - started
+
+  check('the call rejected', error !== undefined)
+  check('rejection is the abort, not a timeout rewrite', error?.code === 'WEB_ABORTED', `code=${error?.code}`)
+  // Discriminating assertion: without the already-aborted guard the backoff runs
+  // its full 500ms and a SECOND request is issued before the abort is noticed.
+  check('no further request was issued while backing off', calls.length === 1, `calls=${calls.length}`)
+  check(
+    'the backoff did not run to completion',
+    elapsed < Number(RETRY_AFTER) * 1000,
+    `elapsed=${elapsed}ms of a ${Number(RETRY_AFTER) * 1000}ms backoff`,
+  )
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)

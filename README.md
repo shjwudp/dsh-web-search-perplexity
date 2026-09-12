@@ -187,14 +187,26 @@ HTTP redirects are rejected. Failures surface as `WebError` with
 
 ```bash
 npm run check        # syntax-check the host, client, and generated skill module
-npm test             # stubbed-fetch tests for the soft deadline and degraded retry
+npm test             # stubbed-fetch host tests, then the settings card's locale dictionaries
 npm run build:skill  # regenerate src/skill.js from the markdown skill source
 ```
 
-`npm test` stubs `globalThis.fetch`, so it never touches the network. It loads
-the host module from an installed DSH profile by default (the `schemastery` and
-`dsh-web` peers are not installed in a plain checkout); set
-`PPLX_PLUGIN_ENTRY` to test a different built copy.
+`npm test` runs two suites. `test/soft-deadline.test.mjs` stubs
+`globalThis.fetch`, so it never touches the network; it loads the host module
+from an installed DSH profile by default (the `schemastery` and `dsh-web` peers
+are not installed in a plain checkout), so set `PPLX_PLUGIN_ENTRY` to test a
+different built copy. `test/client-locale.test.mjs` stubs
+`window.__ModuleLoader__` and drives the real browser half, checking that the
+`zh`/`en` dictionaries stay complete and that `apply` registers them.
+
+### Localization
+
+The settings card follows the harness language setting. Its copy lives in the
+`DICTS` object in `src/client.js` and is registered through
+`ctx.locale.register('web-search-perplexity', { zh, en })`, which requires both
+shipped locales to carry the same key set. Option values that are identifiers
+(`sonar-pro`, preset names, model ids) are deliberately not translated. This
+README and the embedded skill are English-only.
 
 The embedded `perplexity-research` skill is authored as plain markdown at
 `skills/perplexity-research/SKILL.md`. `src/skill.js` is generated
