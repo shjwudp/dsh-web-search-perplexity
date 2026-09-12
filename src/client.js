@@ -398,6 +398,8 @@ window.__ModuleLoader__.load({
           this.listeners = new Set()
           this.saving = false
           this.failed = false
+          /** Message from the most recent failed write, shown beside the buttons. */
+          this.lastError = ''
           this.credential = { ref: '', configured: false, writable: true }
           this.snapshot = this.projection()
           scope.subscribe(() => this.publish())
@@ -424,6 +426,7 @@ window.__ModuleLoader__.load({
             invalid: this.plan().some((item) => item.run === undefined),
             saving: this.saving,
             failed: this.failed,
+            lastError: this.lastError,
             baseURL: this.field('baseURL'),
             apiMode: this.field('apiMode'),
             preset: this.field('preset'),
@@ -450,6 +453,7 @@ window.__ModuleLoader__.load({
             edit: (field, text) => {
               this.staged.set(field, { text, clear: false })
               this.failed = false
+              this.lastError = ''
               this.publish()
             },
             resetField: (field) => {
@@ -457,13 +461,19 @@ window.__ModuleLoader__.load({
               if (spec === undefined) return
               this.staged.set(field, { text: spec.format(this.baseValue(field)), clear: true })
               this.failed = false
+              this.lastError = ''
               this.publish()
             },
             save: () => this.save(),
             discard: () => {
-              if (this.staged.size === 0 && !this.failed) return
+              if (this.staged.size === 0 && !this.failed && !this.saving) return
               this.staged.clear()
               this.failed = false
+              this.lastError = ''
+              // Clearing `saving` here is deliberate: it gates the Save button, so a
+              // `save` that somehow failed to clear it would otherwise leave the card
+              // with no usable control at all.
+              this.saving = false
               this.publish()
             },
           }
@@ -475,13 +485,36 @@ window.__ModuleLoader__.load({
           if (plan.length === 0 || this.saving || writes.length !== plan.length) return
           this.saving = true
           this.failed = false
+          this.lastError = ''
           this.publish()
           let landed = true
-          for (const write of writes) landed = (await write()) && landed
-          if (landed) this.staged.clear()
-          this.saving = false
-          this.failed = !landed
-          this.publish()
+          try {
+            // Each write is attempted even when an earlier one rejects: the settings
+            // scope can refuse one field while accepting another, and the user needs
+            // the writes that did land to be reflected rather than abandoned.
+            for (const write of writes) landed = (await this.run(write)) && landed
+          } finally {
+            // `saving` gates the Save button, so it must clear on every path. A `save`
+            // that could leave it set would strand the card with no way to retry.
+            this.saving = false
+            this.failed = !landed
+            if (landed) this.staged.clear()
+            this.publish()
+          }
+        }
+
+        /**
+         * Attempt one write, recording what went wrong instead of aborting the save.
+         * @param write - one planned write action.
+         * @returns true when the write landed.
+         */
+        async run(write) {
+          try {
+            return (await write()) === true
+          } catch (error) {
+            this.lastError = error instanceof Error ? error.message : String(error)
+            return false
+          }
         }
 
         plan() {
@@ -738,7 +771,10 @@ window.__ModuleLoader__.load({
                 disabled: disabled || (!state.dirty && !state.failed),
                 onClick: () => props.discard(),
               }, t('action.discard')),
-              state.failed ? h('span', { style: styles.error }, t('status.saveFailed')) : null,
+              state.failed
+                ? h('span', { style: styles.error },
+                  state.lastError !== '' ? `${t('status.saveFailed')} ${state.lastError}` : t('status.saveFailed'))
+                : null,
             ),
           ) : null,
         )
