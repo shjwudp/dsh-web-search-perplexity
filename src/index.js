@@ -22,6 +22,16 @@
  * instead of surfacing the harness's opaque `tool call timed out` result. The
  * retry stays synchronous inside the caller's budget: no background request, no
  * pending-task table, and no promise outliving the tool call.
+ *
+ * Because a preset-independent deadline turns that boundary case into the
+ * default path (a flat 25s sat below `medium`'s own measured 25.3s narrow
+ * latency, so every `medium` narrow query degraded), an unset `softTimeoutMs`
+ * is derived per preset via {@link defaultSoftTimeoutMsFor}.
+ *
+ * A degraded answer is marked twice: `degradation` on the seam result, and a
+ * `DEGRADED_MARKER_PREFIX` line carrying the same JSON inside `content` — which
+ * is the only field `dsh-tool-web` forwards to the model. A consumer can
+ * therefore tell a full-depth result from a shallow retry without reading prose.
  */
 
 import z from '@deepseek-ai/schemastery'
@@ -40,17 +50,94 @@ const DEFAULT_API_MODE = 'agent'
 const API_MODES = ['sonar', 'agent']
 const AGENT_PRESETS = ['fast', 'low', 'medium', 'high', 'xhigh', 'wide-research']
 const AGENT_DEFAULT_MODEL = 'openai/gpt-5.6-luna'
-const USER_AGENT = 'dsh-web-search-perplexity/0.1.1'
+// Keep in sync with `version` in package.json.
+const USER_AGENT = 'dsh-web-search-perplexity/0.1.4'
 /**
- * Default soft deadline for one Agent-mode request. Chosen so that the deadline
- * plus the bounded degraded retry stay inside the 60s `web_search` tool budget
- * a DSH agent preset declares (measured: `fast` ≈ 4s, `low` ≈ 5s, `medium` 25s
- * narrow to >180s broad).
+ * `web_search`'s budget under the shipped DSH agent presets: the `tool-web` row
+ * of `@deepseek-ai/dsh-agent-presets` sets `searchTimeoutMs: 60000`
+ * (`dsh-tool-web` alone defaults to 30000, see below). This is a hard ceiling —
+ * past it the harness cancels the call and the caller gets the opaque
+ * `tool call timed out after <ms>ms` that this provider exists to replace — so
+ * every soft deadline here is derived to stay strictly inside it.
  */
-const DEFAULT_SOFT_TIMEOUT_MS = 25_000
-const DEFAULT_FALLBACK_PRESET = 'fast'
+export const TOOL_BUDGET_MS = 60_000
+/** `dsh-tool-web`'s own default budget, for presets that can fit inside it. */
+export const COMPONENT_TOOL_BUDGET_MS = 30_000
 /** Hard cap for the single degraded retry, so the retry cannot overrun the budget. */
-const FALLBACK_TIMEOUT_MS = 15_000
+export const FALLBACK_TIMEOUT_MS = 15_000
+/** Headroom kept between the worst case (`soft + fallback`) and the tool budget. */
+export const SOFT_DEADLINE_MARGIN_MS = 5_000
+/**
+ * Ceiling for a soft deadline. Derived, not chosen: a deadline above this would
+ * leave the degraded retry no room inside the 60s preset budget, so the retry
+ * could not run at all and the caller would get an opaque timeout instead.
+ */
+export const MAX_SOFT_TIMEOUT_MS = TOOL_BUDGET_MS - FALLBACK_TIMEOUT_MS - SOFT_DEADLINE_MARGIN_MS
+/** Deadline for the presets fast enough to also fit the 30s component budget. */
+export const FAST_PRESET_SOFT_TIMEOUT_MS = COMPONENT_TOOL_BUDGET_MS - FALLBACK_TIMEOUT_MS - 3_000
+
+/**
+ * Soft deadline per Agent preset, derived from that preset's measured latency
+ * (`fast` ≈ 4s, `low` ≈ 5s, `medium` ≈ 25s narrow / >180s broad — 25.3s
+ * measured for the narrow case — `high` and `xhigh` slower still,
+ * `wide-research` minutes).
+ *
+ * It must be derived per preset, because one preset-independent constant cannot
+ * be right for all of them. The previous flat 25s default sat *below* the
+ * `medium` preset's own measured 25.3s narrow latency, so every `medium` narrow
+ * query spent the full 25s and was then answered by a `fast` retry: the degraded
+ * path stopped being a boundary case and became the default outcome — strictly
+ * worse than either lowering the preset or raising the deadline.
+ *
+ * Two budget tiers, because the harness budget differs by deployment:
+ *
+ * - `fast` and `low` answer in ~4-5s, so 12s already leaves >2x headroom while
+ *   still satisfying `soft + fallback + margin <= 30s`, the `dsh-tool-web`
+ *   component default. They are safe under either budget.
+ * - `medium` and slower cannot fit a 30s budget at all (a narrow `medium` query
+ *   alone takes ~25s and leaves nothing for a retry), so they take
+ *   `MAX_SOFT_TIMEOUT_MS`, which requires the 60s budget the shipped agent
+ *   presets declare. `medium` then returns at full depth instead of degrading.
+ *
+ * Under a 30s budget, `medium` is unusable whatever this deadline is: lower the
+ * preset to `low`, or raise `tool-web.searchTimeoutMs` in the agent preset.
+ */
+export const PRESET_SOFT_TIMEOUT_MS = Object.freeze({
+  fast: FAST_PRESET_SOFT_TIMEOUT_MS,
+  low: FAST_PRESET_SOFT_TIMEOUT_MS,
+  medium: MAX_SOFT_TIMEOUT_MS,
+  high: MAX_SOFT_TIMEOUT_MS,
+  xhigh: MAX_SOFT_TIMEOUT_MS,
+  'wide-research': MAX_SOFT_TIMEOUT_MS,
+})
+/** Deadline for an Agent-mode request that names no preset. */
+const DEFAULT_SOFT_TIMEOUT_MS = MAX_SOFT_TIMEOUT_MS
+const DEFAULT_FALLBACK_PRESET = 'fast'
+
+/**
+ * The soft deadline one Agent preset gets when `softTimeoutMs` is not
+ * configured. The effective value is echoed in every result's
+ * `degradation.softTimeoutMs`, so no consumer has to guess which deadline was
+ * actually in force.
+ *
+ * @param preset - a configured Agent preset, or `''` when none is set.
+ * @returns the preset's soft deadline in milliseconds.
+ */
+export function defaultSoftTimeoutMsFor(preset) {
+  return PRESET_SOFT_TIMEOUT_MS[preset] ?? DEFAULT_SOFT_TIMEOUT_MS
+}
+
+/**
+ * Prefix of the machine-readable degradation line prepended to `content`; the
+ * rest of that line is one JSON object.
+ *
+ * `content` is the only field that survives `dsh-tool-web`'s closed `web_search`
+ * output schema (`content` / `sources` / `truncated` with
+ * `additionalProperties: false`), so the structured `degradation` object on the
+ * seam result cannot reach the model through that tool. This line carries the
+ * same status across that boundary for one `JSON.parse`, with no prose reading.
+ */
+export const DEGRADED_MARKER_PREFIX = '[DEGRADED] '
 
 const SEARCH_RECENCY_VALUES = ['day', 'week', 'month', 'year']
 
@@ -64,7 +151,9 @@ const Config = z.object({
   model: z.string().default(DEFAULT_MODEL),
   maxTokens: z.number().step(1).min(1).default(DEFAULT_MAX_TOKENS),
   searchRecency: z.string().default(''),
-  softTimeoutMs: z.number().step(1).min(0).default(DEFAULT_SOFT_TIMEOUT_MS),
+  // No schema default: an unset deadline follows the configured preset, so the
+  // default cannot drift out of step with the preset it is paired with.
+  softTimeoutMs: z.number().step(1).min(0),
   fallbackPreset: z.string().default(DEFAULT_FALLBACK_PRESET),
 })
 
@@ -174,20 +263,25 @@ function resolveOptions(ctx, config) {
   // With an Agent preset, the model is only sent as an explicit override when
   // the user actually configured a `provider/model` slug.
   const agentModelOverride = apiMode === 'agent' && rawModel.includes('/') ? rawModel : undefined
+  const preset = AGENT_PRESETS.includes(c.preset) ? c.preset : ''
+  // An explicit `softTimeoutMs` always wins — including 0, which disables the
+  // deadline. Otherwise the deadline follows the configured preset's measured
+  // latency instead of a preset-independent constant.
+  const softTimeoutMs = Number.isInteger(c.softTimeoutMs) && c.softTimeoutMs >= 0
+    ? c.softTimeoutMs
+    : defaultSoftTimeoutMsFor(preset)
   return {
     apiKey: literalApiKey,
     apiKeyEnv,
     apiMode,
     agentModelOverride,
-    preset: AGENT_PRESETS.includes(c.preset) ? c.preset : '',
+    preset,
     baseURL: typeof c.baseURL === 'string' && c.baseURL.length > 0 ? c.baseURL : DEFAULT_BASE_URL,
     model,
     maxTokens: Number.isInteger(c.maxTokens) && c.maxTokens > 0 ? c.maxTokens : DEFAULT_MAX_TOKENS,
     searchRecency: SEARCH_RECENCY_VALUES.includes(c.searchRecency) ? c.searchRecency : undefined,
     // 0 disables the soft deadline, restoring the single-request behavior.
-    softTimeoutMs: Number.isInteger(c.softTimeoutMs) && c.softTimeoutMs >= 0
-      ? c.softTimeoutMs
-      : DEFAULT_SOFT_TIMEOUT_MS,
+    softTimeoutMs,
     // Only a fast synchronous preset is a useful degraded retry: `wide-research`
     // is a minutes-long background workflow by design, not a latency fallback.
     fallbackPreset: AGENT_PRESETS.includes(c.fallbackPreset) && c.fallbackPreset !== 'wide-research'
@@ -297,17 +391,52 @@ function agentRequestBody(request, options, preset) {
 }
 
 /**
+ * Machine-readable degradation status for one result.
+ *
+ * The degraded retry used to be visible only as the prose sentence prepended to
+ * `content`, so a reader in a hurry — a subagent, a later session — could miss
+ * that line and cite a shallow answer as full-depth research. Every result now
+ * carries this object instead: whether the answer degraded, which preset was
+ * asked for, which preset actually answered, and the soft deadline in force.
+ *
+ * Caveat: `dsh-tool-web` re-projects the seam result into its own closed
+ * `web_search` output schema, so this object reaches direct `ctx.web.search`
+ * consumers but not the model-facing tool result. `DEGRADED_MARKER_PREFIX` plus
+ * one JSON object inside `content` is what carries the same status across that
+ * boundary.
+ *
+ * @param requestedPreset - the preset the caller asked for.
+ * @param actualPreset - the preset that produced this answer.
+ * @param softTimeoutMs - the soft deadline that was in force (0 when disabled).
+ * @returns the status object shared by the seam result and the content marker.
+ */
+function degradationStatus(requestedPreset, actualPreset, softTimeoutMs) {
+  const degraded = actualPreset !== requestedPreset
+  return {
+    degraded,
+    requestedPreset,
+    actualPreset,
+    softTimeoutMs,
+    fallbackTimeoutMs: degraded ? FALLBACK_TIMEOUT_MS : 0,
+  }
+}
+
+/**
  * Label a fallback answer as degraded, so neither the model nor the user can
- * mistake a shallow retry for the full-depth result that was requested.
+ * mistake a shallow retry for the full-depth result that was requested. The
+ * machine-readable marker comes first so it survives a truncated read.
  */
 function degradedAgentResult(data, options) {
   const mapped = mapAgentResponse(data)
-  const note = `(Degraded result: the "${options.preset}" agent search passed its `
+  const status = degradationStatus(options.preset, options.fallbackPreset, options.softTimeoutMs)
+  const note = `${DEGRADED_MARKER_PREFIX}${JSON.stringify(status)}\n`
+    + `(Degraded result: the "${options.preset}" agent search passed its `
     + `${Math.round(options.softTimeoutMs / 1000)}s soft deadline, so this answer was retried with the `
     + `"${options.fallbackPreset}" preset and is shallower than requested. Narrow the query, or raise `
     + 'web-search-perplexity.softTimeoutMs together with the web_search tool budget.)'
   return {
     ...mapped,
+    degradation: status,
     content: mapped.content !== undefined ? `${note}\n\n${mapped.content}` : note,
   }
 }
@@ -440,7 +569,10 @@ export function apply(ctx, config = {}) {
         // No soft deadline configured: one request, exactly as before.
         if (!(options.softTimeoutMs > 0)) {
           const data = await requestJson(url, apiKey, agentRequestBody(request, options, options.preset), signal)
-          return mapAgentResponse(data)
+          return {
+            ...mapAgentResponse(data),
+            degradation: degradationStatus(options.preset, options.preset, 0),
+          }
         }
 
         const primary = softDeadline(signal, options.softTimeoutMs)
@@ -458,7 +590,12 @@ export function apply(ctx, config = {}) {
         } finally {
           primary.clear()
         }
-        if (!softTimedOut) return mapAgentResponse(primaryData)
+        if (!softTimedOut) {
+          return {
+            ...mapAgentResponse(primaryData),
+            degradation: degradationStatus(options.preset, options.preset, options.softTimeoutMs),
+          }
+        }
 
         // Degraded retry: a shallow answer inside the budget beats the opaque
         // `tool call timed out` result the caller would otherwise receive.
@@ -494,7 +631,11 @@ export function apply(ctx, config = {}) {
         },
         signal,
       )
-      return mapPerplexityResponse(data)
+      return {
+        ...mapPerplexityResponse(data),
+        // Sonar mode has no preset, so nothing can degrade.
+        degradation: degradationStatus('', '', 0),
+      }
     },
   })
 }

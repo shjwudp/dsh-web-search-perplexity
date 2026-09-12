@@ -590,12 +590,15 @@ window.__ModuleLoader__.load({
               : null,
             isAgent
               ? h('div', null,
-                h(Field, { label: 'Soft deadline (ms)', field: 'softTimeoutMs', state: state.softTimeoutMs, disabled, edit: props.edit, placeholder: '25000' }),
+                h(Field, { label: 'Soft deadline (ms)', field: 'softTimeoutMs', state: state.softTimeoutMs, disabled, edit: props.edit, placeholder: 'preset default' }),
                 h(SelectField, { label: 'Fallback preset', field: 'fallbackPreset', state: state.fallbackPreset, disabled, edit: props.edit, options: FALLBACK_PRESET_OPTIONS }),
                 h('div', { style: styles.note },
-                  'When an agent search passes the soft deadline it retries once on this preset and labels the '
-                  + 'shallower answer instead of letting the outer tool call time out. 0 disables it. Keep '
-                  + 'soft deadline + 15s below the web_search tool budget.'),
+                  'Leave blank to derive the deadline from the preset (fast/low 12000; medium and slower 40000). '
+                  + 'When an agent search passes it the provider retries once on the fallback preset and marks the '
+                  + 'shallower answer instead of letting the outer tool call time out: the content starts with '
+                  + '[DEGRADED] plus JSON, and the result carries a degradation field. 0 disables it. Keep the '
+                  + 'deadline + 15s below the web_search tool budget (60000 under the shipped agent presets; the '
+                  + 'dsh-tool-web component default is 30000).'),
               )
               : null,
             h(SecretField, { state, disabled, edit: props.edit }),

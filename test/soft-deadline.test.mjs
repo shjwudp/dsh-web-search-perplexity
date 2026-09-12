@@ -8,17 +8,79 @@
  * Run: npm test
  *
  * The host module imports the `@deepseek-ai/schemastery` and `@deepseek-ai/dsh-web`
- * peers, which a plain checkout of this repository does not install. By default
- * the test therefore loads the copy installed into a DSH profile; point
- * `PPLX_PLUGIN_ENTRY` at any other built copy (for example a local
- * `file:C:/.../dsh-web-search-perplexity`) to test that one instead.
+ * peers, which a plain checkout of this repository does not install. The entry is
+ * therefore chosen in this order, so that a test run is never silently checking a
+ * different (possibly stale) copy than the one under review:
+ *
+ * 1. `PPLX_PLUGIN_ENTRY` — an explicit absolute module specifier, e.g. a
+ *    `file:///...` URL or a path to any built copy.
+ * 2. This repository's own `src/index.js`, when Node can also resolve its peers
+ *    from here (a DSH profile install, or a checkout with the peers linked in).
+ * 3. The plugin installed into a DSH profile, which does resolve the peers but
+ *    may lag the working tree.
+ *
+ * The chosen entry is printed so a surprising result is visible, not implied.
  */
 
-const DEFAULT_ENTRY =
-  'file:///C:/Users/Administrator/.dsh/profiles/web/node_modules/@shjwudp/dsh-web-search-perplexity/src/index.js'
-const MODULE = process.env.PPLX_PLUGIN_ENTRY ?? DEFAULT_ENTRY
+import { existsSync } from 'node:fs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { dirname, resolve } from 'node:path'
 
-const { apply } = await import(MODULE)
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const repoEntry = resolve(repoRoot, 'src/index.js')
+
+/**
+ * Machine-specific fallback: a DSH profile install on the author's machine. On
+ * any other machine this path does not exist, the import fails loudly with
+ * `ERR_MODULE_NOT_FOUND`, and `PPLX_PLUGIN_ENTRY` is the supported way in.
+ */
+const PROFILE_ENTRY =
+  'file:///C:/Users/Administrator/.dsh/profiles/web/node_modules/@shjwudp/dsh-web-search-perplexity/src/index.js'
+
+/** True when `specifier` imports without a module-resolution failure. */
+async function isImportable(specifier) {
+  try {
+    await import(specifier)
+    return true
+  } catch (error) {
+    const unresolved = error?.code === 'ERR_MODULE_NOT_FOUND' || error?.code === 'ERR_UNSUPPORTED_DIR_IMPORT'
+    if (unresolved) return false
+    // The module loaded and threw while being evaluated: it is resolvable.
+    return true
+  }
+}
+
+async function chooseEntry() {
+  const override = process.env.PPLX_PLUGIN_ENTRY
+  if (override !== undefined && override !== '') return override
+  if (existsSync(repoEntry) && await isImportable(pathToFileURL(repoEntry).href)) {
+    return pathToFileURL(repoEntry).href
+  }
+  return PROFILE_ENTRY
+}
+
+const MODULE = await chooseEntry()
+if (process.env.PPLX_PLUGIN_ENTRY === undefined) {
+  const fromWorkingTree = MODULE.includes(repoRoot.replace(/\\/g, '/'))
+  console.log(`\nentry: ${MODULE}`)
+  if (fromWorkingTree) {
+    console.log('       (this repository\'s working tree — tests the code under review)')
+  } else {
+    console.log('       (installed profile copy — NOT the working tree)')
+    console.log('       The peers are unreachable from this checkout, so these results describe the')
+    console.log('       installed copy. Set PPLX_PLUGIN_ENTRY to test a different one.')
+  }
+}
+
+const {
+  apply,
+  defaultSoftTimeoutMsFor,
+  PRESET_SOFT_TIMEOUT_MS,
+  FALLBACK_TIMEOUT_MS,
+  TOOL_BUDGET_MS,
+  COMPONENT_TOOL_BUDGET_MS,
+  DEGRADED_MARKER_PREFIX,
+} = await import(MODULE)
 
 let failures = 0
 function check(name, condition, detail = '') {
@@ -109,6 +171,25 @@ console.log('\n1. soft deadline -> degraded fast fallback')
   check('fallback text is returned', String(result.content).includes('fast answer'))
   check('sources survive the fallback', result.sources.length === 1 && result.sources[0].url === 'https://example.com/a')
   check('returned well inside the 60s budget', elapsed >= 300 && elapsed < 2000, `elapsed=${elapsed}ms`)
+
+  // ── the machine-readable degradation contract (marker + seam field) ──
+  const markerLine = String(result.content).split('\n', 1)[0]
+  check('the degraded marker is the first line of content',
+    markerLine.startsWith(DEGRADED_MARKER_PREFIX), markerLine.slice(0, 90))
+  let markerStatus
+  try {
+    markerStatus = JSON.parse(markerLine.slice(DEGRADED_MARKER_PREFIX.length))
+  } catch {
+    markerStatus = undefined
+  }
+  check('the marker payload is one JSON object', markerStatus !== undefined, markerLine.slice(0, 120))
+  check('the seam result carries the same status as the marker',
+    JSON.stringify(result.degradation) === JSON.stringify(markerStatus),
+    `${JSON.stringify(result.degradation)} vs ${JSON.stringify(markerStatus)}`)
+  check('the status says the answer degraded', markerStatus?.degraded === true, JSON.stringify(markerStatus))
+  check('the status names the requested preset', markerStatus?.requestedPreset === 'medium', JSON.stringify(markerStatus))
+  check('the status names the preset that actually answered', markerStatus?.actualPreset === 'fast', JSON.stringify(markerStatus))
+  check('the status reports the deadline that was in force', markerStatus?.softTimeoutMs === 300, JSON.stringify(markerStatus))
 }
 
 // ── 2. An outer cancellation never retries: no budget is left ──────────────────
@@ -155,6 +236,88 @@ console.log('\n4. primary and fallback both stall -> actionable error')
   check('error names the soft deadline', String(error?.message).includes('soft deadline'), String(error?.message))
   check('error suggests a remedy', String(error?.message).includes('narrower'), String(error?.message))
   check('error is a provider error', error?.code === 'WEB_PROVIDER_ERROR', `code=${error?.code}`)
+}
+
+// ── 5. An unset soft deadline follows the preset, not one flat constant ────────
+// The previous flat 25 s default sat *below* the `medium` preset's own measured
+// 25.3 s narrow-query latency, so every `medium` narrow query spent the full
+// 25 s and was then answered by a `fast` retry: the degraded path stopped being
+// a boundary case and became the default outcome. The default is now derived
+// per preset, and every value must still leave room for the retry inside the
+// tool budget the session actually runs under.
+console.log('\n5. an unset soft deadline is derived from the preset')
+// Resolved once here, reused by block 6.
+const FAST_TIER_MS = defaultSoftTimeoutMsFor('fast')
+const MEDIUM_TIER_MS = defaultSoftTimeoutMsFor('medium')
+{
+  const MEASURED_MEDIUM_NARROW_MS = 25_300
+  const presets = ['fast', 'low', 'medium', 'high', 'xhigh', 'wide-research']
+
+  check('the assumed budgets match the shipped DSH rows',
+    TOOL_BUDGET_MS === 60_000 && COMPONENT_TOOL_BUDGET_MS === 30_000,
+    `preset=${TOOL_BUDGET_MS} component=${COMPONENT_TOOL_BUDGET_MS}`)
+  check('the preset default plus its retry fits the 60 s preset budget',
+    presets.every((p) => defaultSoftTimeoutMsFor(p) + FALLBACK_TIMEOUT_MS <= TOOL_BUDGET_MS),
+    presets.map((p) => `${p}=${defaultSoftTimeoutMsFor(p)}`).join(' '))
+  check('the medium default clears the measured narrow latency',
+    defaultSoftTimeoutMsFor('medium') > MEASURED_MEDIUM_NARROW_MS,
+    `medium=${defaultSoftTimeoutMsFor('medium')}ms vs measured ${MEASURED_MEDIUM_NARROW_MS}ms`)
+  check('the medium default is the derived ceiling, not an ad-hoc number',
+    MEDIUM_TIER_MS === TOOL_BUDGET_MS - FALLBACK_TIMEOUT_MS - 5_000, `medium=${MEDIUM_TIER_MS}`)
+  check('the fast presets also fit the 30 s component budget',
+    ['fast', 'low'].every((p) => defaultSoftTimeoutMsFor(p) + FALLBACK_TIMEOUT_MS <= COMPONENT_TOOL_BUDGET_MS),
+    `fast=${FAST_TIER_MS} budget=${COMPONENT_TOOL_BUDGET_MS}`)
+  check('every preset default is one of the two derived tiers',
+    presets.every((p) => defaultSoftTimeoutMsFor(p) === FAST_TIER_MS || defaultSoftTimeoutMsFor(p) === MEDIUM_TIER_MS),
+    JSON.stringify(PRESET_SOFT_TIMEOUT_MS))
+  check('the old flat 25 s default is gone from every preset',
+    presets.every((p) => defaultSoftTimeoutMsFor(p) !== 25_000),
+    JSON.stringify(PRESET_SOFT_TIMEOUT_MS))
+  check('an unset preset falls back to the ceiling',
+    defaultSoftTimeoutMsFor('') === MEDIUM_TIER_MS, `unset=${defaultSoftTimeoutMsFor('')}`)
+}
+
+// ── 6. The derived default is what the provider actually resolves ──────────────
+console.log('\n6. resolveOptions applies the preset default; an explicit value wins')
+{
+  stubFetch([() => agentOk('medium answer')])
+  // No softTimeoutMs in the config: the preset-derived default must apply.
+  const mediumResult = await makeProvider({ ...baseConfig })
+    .search({ query: 'narrow question', maxResults: 5 })
+
+  check('medium without softTimeoutMs resolves the medium default',
+    mediumResult.degradation?.softTimeoutMs === MEDIUM_TIER_MS,
+    `resolved=${mediumResult.degradation?.softTimeoutMs}`)
+  check('a full-depth answer reports not degraded', mediumResult.degradation?.degraded === false,
+    JSON.stringify(mediumResult.degradation))
+  check('a full-depth answer carries no degraded marker',
+    !String(mediumResult.content).includes(DEGRADED_MARKER_PREFIX))
+  check('a full-depth answer reports the preset that answered',
+    mediumResult.degradation?.requestedPreset === 'medium'
+      && mediumResult.degradation?.actualPreset === 'medium'
+      && mediumResult.degradation?.fallbackTimeoutMs === 0,
+    JSON.stringify(mediumResult.degradation))
+
+  stubFetch([() => agentOk('low answer')])
+  const lowResult = await makeProvider({ ...baseConfig, preset: 'low' })
+    .search({ query: 'narrow question', maxResults: 5 })
+  check('a cheaper preset resolves its own, smaller default',
+    lowResult.degradation?.softTimeoutMs === FAST_TIER_MS && FAST_TIER_MS !== MEDIUM_TIER_MS,
+    `low=${lowResult.degradation?.softTimeoutMs} medium=${MEDIUM_TIER_MS}`)
+
+  const explicitCalls = stubFetch([() => agentOk('explicit answer')])
+  const explicitResult = await makeProvider({ ...baseConfig, softTimeoutMs: 7_000 })
+    .search({ query: 'narrow question', maxResults: 5 })
+  check('an explicit softTimeoutMs overrides the preset default',
+    explicitResult.degradation?.softTimeoutMs === 7_000, `resolved=${explicitResult.degradation?.softTimeoutMs}`)
+  check('the override adds no attempt', explicitCalls.length === 1, `calls=${explicitCalls.length}`)
+
+  stubFetch([() => agentOk('undeadlined answer')])
+  const offResult = await makeProvider({ ...baseConfig, softTimeoutMs: 0 })
+    .search({ query: 'narrow question', maxResults: 5 })
+  check('0 still disables the deadline and reserves no retry budget',
+    offResult.degradation?.softTimeoutMs === 0 && offResult.degradation?.fallbackTimeoutMs === 0,
+    JSON.stringify(offResult.degradation))
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)

@@ -48,15 +48,16 @@ or edit content already provided in the conversation or repository.
 ## Tool budget, presets, and timeouts
 
 `web_search` runs under a harness deadline (`dsh-tool-web`'s
-`searchTimeoutMs`; a session's **agent preset** supplies that row, commonly
-60000 ms). The Perplexity **Agent API** preset trades depth for latency, so
-query breadth decides whether a call fits. Measured against the Agent API:
+`searchTimeoutMs`: **30000 by default**, raised to 60000 by the shipped agent
+presets that supply the model-facing `tool-web` row). The Perplexity **Agent
+API** preset trades depth for latency, so query breadth decides whether a call
+fits. Measured against the Agent API:
 
 | preset | measured latency |
 | --- | --- |
 | `fast` | ~4 s |
 | `low` | ~5 s |
-| `medium` | ~25 s for a narrow query, >180 s for a broad one |
+| `medium` | ~25 s (25.3 s measured) for a narrow query, >180 s for a broad one |
 | `high` / `xhigh` | slower still |
 | `wide-research` | minutes; an asynchronous workflow, not a synchronous search |
 
@@ -70,19 +71,34 @@ Discipline that keeps research inside the budget:
 3. On `Error: tool call timed out after <ms>ms`, do **not** repeat the same
    broad query. Narrow it, or drop the preset for that query
    (`medium` → `low` → `fast`), and say which one was used.
-4. A result whose content starts with `(Degraded result: ...)` means the soft
-   deadline fired and a faster preset answered. Treat it as a shallower source:
-   re-verify material claims or re-ask narrowly instead of citing it as
-   full-depth research.
+4. **Check every result for degradation before using it.** The first line of the
+   answer content is machine-readable: a shallow retry starts with
+   `[DEGRADED] ` followed by one JSON object, e.g.
+   `[DEGRADED] {"degraded":true,"requestedPreset":"medium","actualPreset":"fast","softTimeoutMs":40000,"fallbackTimeoutMs":15000}`.
+   A result that does not degrade has no such line. Never decide this by reading
+   the surrounding prose — parse the line, or check `degradation` on the result
+   when you call `ctx.web.search` directly. If `degraded` is `true`, treat the
+   answer as a shallower source: re-verify material claims or re-ask narrowly,
+   and say which preset produced it, instead of citing it as full-depth
+   research.
 5. If the backend is unreachable or repeatedly over budget, fall back to
    `web_fetch` on a URL you already know, or to another configured provider,
    rather than retrying the same timed-out call.
 
-The plugin's `web-search-perplexity` settings govern this: `softTimeoutMs`
-(default 25000; `0` disables the deadline) and `fallbackPreset` (default
-`fast`). Keep `softTimeoutMs` + 15 s below the tool budget. To change the budget
-itself, edit the **agent preset**, not the profile patch: the preset supplies
-the model-facing `tool-web` row, so copy the shipped composition into
+The plugin's `web-search-perplexity` settings govern this: `softTimeoutMs` and
+`fallbackPreset` (default `fast`). Leave `softTimeoutMs` unset and it is derived
+from the configured preset instead of being one flat value — `fast`/`low`
+`12000`, and `medium`/`high`/`xhigh`/`wide-research`/unset `40000` — because a
+single constant cannot suit presets that differ by two orders of magnitude
+(a flat `25000` sat below `medium`'s own measured 25.3 s narrow latency and so
+degraded every `medium` narrow query). `0` disables the deadline. Keep
+`softTimeoutMs` + 15 s below the tool budget. That budget is the `tool-web`
+row's `searchTimeoutMs`, which defaults to 30000 in the component although the
+shipped agent presets raise it to 60000. `medium` cannot fit a 30 s budget at
+all (~25 s for one narrow query, leaving nothing for a retry), so under a 30 s
+budget lower the preset rather than the deadline. To change the budget itself,
+edit the **agent preset**, not the profile patch: the preset supplies the
+model-facing `tool-web` row, so copy the shipped composition into
 `$DSH_HOME/.agent-presets/<id>/agent.cordis.yml` and select that preset.
 
 ## Batching with the Perplexity CLI
