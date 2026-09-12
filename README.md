@@ -14,7 +14,8 @@ dependencies.
 ## Compatibility
 
 - Tested with **DSH 0.1.5-rc.2** (`@deepseek-ai/dsh-web` 0.1.5-rc.2,
-  `@deepseek-ai/schemastery` 3.18.2)
+  `@deepseek-ai/schemastery` 3.18.2). The host version numbers below are DSH's,
+  not this plugin's; this package's own versions are the `v*` tags.
 - Peer dependencies: `@deepseek-ai/dsh-web: ^0.1.2-rc.1`,
   `@deepseek-ai/schemastery: ^3.18.1-rc.1`. The declared range is unchanged and
   its lower bound is where this plugin was first written, so an older 0.1.2-rc.x
@@ -36,7 +37,7 @@ dependencies.
 ## Install
 
 ```bash
-dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.5
+dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.6-rc.1
 ```
 
 Then tell the web seam to use the Perplexity provider in
