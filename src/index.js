@@ -2,15 +2,17 @@
  * Standalone Perplexity search provider for the DeepSeek Harness web seam.
  *
  * Registers a `WebSearchProvider` with id `perplexity` into `ctx.web`.
- * It calls Perplexity's OpenAI-compatible `POST /chat/completions` endpoint
- * and maps the generated answer plus `search_results[]` / `citations[]`
- * into the seam's normalized `WebSearchResult`.
+ * It calls Perplexity's Agent API (`POST /v1/agent`) and maps the generated
+ * answer plus its `search_results[]` into the seam's normalized
+ * `WebSearchResult`. No other endpoint is supported: Perplexity's Sonar Chat
+ * Completions API is deprecated (supported only until 2026-09-27), and the
+ * Agent API is its replacement.
  *
  * Configuration is exposed through the durable `web-search-perplexity`
  * settings namespace, so the web UI's Plugins settings can edit baseURL,
  * model, maxTokens, searchRecency, the soft deadline and its fallback preset,
- * and the API key (the key is stored through the credentials domain, never in
- * the settings file).
+ * the image settings, and the API key (the key is stored through the
+ * credentials domain, never in the settings file).
  *
  * This plugin does NOT depend on `@deepseek-ai/dsh-environment` (which is not
  * published on the npm registry). As a fallback it still reads the
@@ -32,26 +34,56 @@
  * `DEGRADED_MARKER_PREFIX` line carrying the same JSON inside `content` — which
  * is the only field `dsh-tool-web` forwards to the model. A consumer can
  * therefore tell a full-depth result from a shallow retry without reading prose.
+ *
+ * Image input: `dsh-tool-web` hands this provider nothing but `request.query`
+ * (`WebSearchRequest` declares only `query` and `maxResults`), so an image can
+ * only arrive as text. A query naming a local image file or a public image URL
+ * is therefore sent as that image plus its text question, using Perplexity's
+ * multimodal content parts. A local file is read only when its media type is
+ * allowed, it sits inside a configured `imageRoots` entry, it is within
+ * `imageMaxBytes`, and its bytes really are that format — otherwise the request
+ * fails loudly instead of shipping an arbitrary document to Perplexity. An
+ * image-bearing request is marked with an `IMAGE_MARKER_PREFIX` line inside
+ * `content`, carrying the same JSON as `images` on the seam result.
  */
 
+import { readFile, stat } from 'node:fs/promises'
+import { isAbsolute, relative, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { WebError } from '@deepseek-ai/dsh-web'
 import { PERPLEXITY_RESEARCH_SKILL } from './skill.js'
+import { PerplexitySearchApiProvider, SEARCH_API_PROVIDER_ID } from './search-api.js'
+import { canParseURL, isAbortError, requestJson as postJson, resolveApiKey } from './shared.js'
 
 export const name = 'web-search-perplexity'
 export const inject = ['web']
 
+// The Search API backend lives in its own module; re-export its surface so this
+// package has one entry point, and so both backends can be imported together.
+export {
+  SEARCH_API_MARKER_PREFIX,
+  SEARCH_API_MAX_DOMAINS,
+  SEARCH_API_MAX_LANGUAGES,
+  SEARCH_API_MAX_RESULTS_PEOPLE,
+  SEARCH_API_MAX_RESULTS_WEB,
+  SEARCH_API_PATH,
+  SEARCH_API_PROVIDER_ID,
+  SEARCH_API_RECENCY_VALUES,
+  SEARCH_API_TYPES,
+  SEARCH_CONTEXT_SIZES,
+  PerplexitySearchApiProvider,
+  mapSearchApiResponse,
+  maxResultsFor,
+  resolveSearchApiOptions,
+  searchApiRequestBody,
+} from './search-api.js'
+
 const SETTINGS_NAMESPACE = 'web-search-perplexity'
 const DEFAULT_BASE_URL = 'https://api.perplexity.ai'
-const DEFAULT_MODEL = 'sonar'
 const DEFAULT_MAX_TOKENS = 1024
 const DEFAULT_API_KEY_ENV = 'PERPLEXITY_API_KEY'
-const DEFAULT_API_MODE = 'agent'
-const API_MODES = ['sonar', 'agent']
 const AGENT_PRESETS = ['fast', 'low', 'medium', 'high', 'xhigh', 'wide-research']
 const AGENT_DEFAULT_MODEL = 'openai/gpt-5.6-luna'
-// Keep in sync with `version` in package.json.
-const USER_AGENT = 'dsh-web-search-perplexity/0.1.6-rc.1'
 /**
  * `web_search`'s budget under the shipped DSH agent presets: the `tool-web` row
  * of `@deepseek-ai/dsh-agent-presets` sets `searchTimeoutMs: 60000`
@@ -80,6 +112,17 @@ export const FAST_DEADLINE_MARGIN_MS = 3_000
 export const MAX_SOFT_TIMEOUT_MS = TOOL_BUDGET_MS - FALLBACK_TIMEOUT_MS - SOFT_DEADLINE_MARGIN_MS
 /** Deadline for the presets fast enough to also fit the 30s component budget. */
 export const FAST_PRESET_SOFT_TIMEOUT_MS = COMPONENT_TOOL_BUDGET_MS - FALLBACK_TIMEOUT_MS - FAST_DEADLINE_MARGIN_MS
+/**
+ * Extra deadline an image-bearing search gets over a text one. An image search
+ * does strictly more work than the text search the same preset bounds: the image
+ * is uploaded and then read by a separate vision pass before the search runs.
+ * Keeping the text deadline would therefore degrade image searches that are
+ * behaving normally, while a preset-independent absolute value would be wrong for
+ * the same reason one flat `softTimeoutMs` was wrong for every preset. It is an
+ * internal margin rather than a setting, so no configuration can pair a text
+ * deadline with an image deadline that contradicts it.
+ */
+export const IMAGE_ANALYSIS_MARGIN_MS = 12_000
 
 /**
  * Soft deadline per Agent preset, derived from that preset's measured latency
@@ -120,6 +163,46 @@ const DEFAULT_SOFT_TIMEOUT_MS = MAX_SOFT_TIMEOUT_MS
 const DEFAULT_FALLBACK_PRESET = 'fast'
 
 /**
+ * Per-image byte ceiling. Perplexity's own base64 limit is 50 MB.
+ *
+ * An image request carries no model of its own: measured against the Agent API,
+ * a preset's own model reads images correctly (`preset: fast` answers an image
+ * question with `openai/gpt-5.6-luna` and the right answer), so image and text
+ * requests share one model selector and cannot disagree.
+ */
+const DEFAULT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
+
+/** Media type selected by a file extension, for an extension that names an image. */
+const IMAGE_MEDIA_TYPE_BY_EXTENSION = Object.freeze({
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+})
+
+/** Extension of each allowed media type, used in the refusal messages. */
+const IMAGE_EXTENSION_BY_MEDIA_TYPE = Object.freeze({
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+})
+
+/** A local image path candidate: the leading character of a filesystem path. */
+const LOCAL_IMAGE_PATH_PATTERN = /^(?:[A-Za-z]:[\\/]|\\\\|\/|\.{1,2}[\\/])/
+/** A candidate image URL: public HTTPS with a recognized image extension. */
+const IMAGE_URL_PATTERN = /^https:\/\/\S+\.(?:png|jpe?g|gif|webp)(?:\?\S*)?$/i
+
+/**
+ * Prefix of the machine-readable image line prepended to `content`. Like
+ * `DEGRADED_MARKER_PREFIX`, this is the only route for the `images` object on
+ * the seam result into `dsh-tool-web`'s closed `web_search` output schema.
+ */
+export const IMAGE_MARKER_PREFIX = '[IMAGE] '
+
+/**
  * The soft deadline one Agent preset gets when `softTimeoutMs` is not
  * configured. The effective value is echoed in every result's
  * `degradation.softTimeoutMs`, so no consumer has to guess which deadline was
@@ -144,38 +227,43 @@ export function defaultSoftTimeoutMsFor(preset) {
  */
 export const DEGRADED_MARKER_PREFIX = '[DEGRADED] '
 
+/**
+ * Recency windows accepted by the Agent API's `web_search` tool filter
+ * (`tools[].filters.search_recency_filter`).
+ */
 const SEARCH_RECENCY_VALUES = ['day', 'week', 'month', 'year']
 
 /** Durable settings section surfaced as a plugin-config card in the web UI. */
 const Config = z.object({
   apiKey: z.string().role('secret'),
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
-  apiMode: z.string().default(DEFAULT_API_MODE),
   preset: z.string().default(''),
   baseURL: z.string().default(DEFAULT_BASE_URL),
-  model: z.string().default(DEFAULT_MODEL),
+  model: z.string().default(AGENT_DEFAULT_MODEL),
   maxTokens: z.number().step(1).min(1).default(DEFAULT_MAX_TOKENS),
   searchRecency: z.string().default(''),
   // No schema default: an unset deadline follows the configured preset, so the
   // default cannot drift out of step with the preset it is paired with.
   softTimeoutMs: z.number().step(1).min(0),
   fallbackPreset: z.string().default(DEFAULT_FALLBACK_PRESET),
+  // Blank enables image input; only the literal "off"/"false"/"0" disables it,
+  // so a cleared field cannot silently change what the provider sends.
+  imageInput: z.string().default(''),
+  imageMaxBytes: z.number().step(1).min(1).default(DEFAULT_IMAGE_MAX_BYTES),
+  imageRoots: z.array(z.string()).default([]),
+  // Which of this plugin's two backends serves searches. Blank keeps the Agent
+  // API; only the Search API's id switches. Both are never registered as usable
+  // at once, because two usable providers make the seam's selection ambiguous.
+  searchProvider: z.string().default(''),
+  searchType: z.string().default('web'),
+  searchDomains: z.array(z.string()).default([]),
+  searchLanguages: z.array(z.string()).default([]),
+  searchCountry: z.string().default(''),
+  searchContextSize: z.string().default('medium'),
+  searchMaxTokensPerPage: z.number().step(1).min(1),
+  searchAfterDate: z.string().default(''),
+  searchBeforeDate: z.string().default(''),
 })
-
-function canParseURL(value) {
-  try {
-    // Only HTTPS is safe here: the provider sends the Perplexity API key in the
-    // Authorization header, so an http:// baseURL would leak it in cleartext.
-    return new URL(value).protocol === 'https:'
-  } catch {
-    return false
-  }
-}
-
-function isAbortError(error) {
-  return (error instanceof Error && error.name === 'AbortError')
-    || (typeof DOMException !== 'undefined' && error instanceof DOMException && error.name === 'AbortError')
-}
 
 /** Map one structured Perplexity search result into a normalized source. */
 function mapPerplexityResult(result) {
@@ -187,26 +275,9 @@ function mapPerplexityResult(result) {
   }
 }
 
-/** Map a Perplexity chat-completions response into a normalized search result. */
-function mapPerplexityResponse(data) {
-  const rawContent = data.choices?.[0]?.message?.content
-  const finishReason = data.choices?.[0]?.finish_reason
-  const content = typeof rawContent === 'string' && rawContent.length > 0
-    ? rawContent + (finishReason === 'length'
-      ? '\n\n(Truncated: the response reached max_tokens. Increase maxTokens for a complete answer.)'
-      : '')
-    : undefined
-  const sources = data.search_results !== undefined
-    ? data.search_results.map(mapPerplexityResult)
-    : (data.citations ?? []).map((url) => ({ url }))
-  return {
-    ...(content !== undefined ? { content } : {}),
-    sources,
-    truncated: false,
-  }
-}
-
-/** Map an Agent API response into a normalized search result. */
+/**
+ * Map an Agent API response into a normalized search result.
+ */
 function mapAgentResponse(data) {
   const texts = []
   const sources = []
@@ -247,6 +318,195 @@ function mapAgentResponse(data) {
   }
 }
 
+/** Detect an image media type from leading bytes, independent of any extension. */
+function sniffImageMediaType(bytes) {
+  if (bytes.length >= 8
+    && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+    && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return 'image/png'
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
+  if (bytes.length >= 6) {
+    const gif = String.fromCharCode(...bytes.subarray(0, 6))
+    if (gif === 'GIF87a' || gif === 'GIF89a') return 'image/gif'
+  }
+  if (bytes.length >= 12
+    && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF'
+    && String.fromCharCode(...bytes.subarray(8, 12)) === 'WEBP') return 'image/webp'
+  return undefined
+}
+
+/** True when `path` is inside one of the configured roots, or no roots are set. */
+function isWithinImageRoots(path, roots) {
+  if (roots.length === 0) return true
+  return roots.some((root) => {
+    const candidate = relative(root, path)
+    return candidate === '' || (!candidate.startsWith('..') && !isAbsolute(candidate))
+  })
+}
+
+/**
+ * Read one local image query and turn it into a data URI.
+ *
+ * @param {string} path - the query, read as a filesystem path.
+ * @param {object} options - resolved provider options.
+ * @returns {Promise<{kind: 'image', mediaType: string, dataUri: string, bytes: number}>}
+ *   the inline image, or `{kind: 'text'}` when the path is not an image at all.
+ * @throws {WebError} when the path names a file that is refused — outside
+ *   `imageRoots`, over `imageMaxBytes`, or not the image format its extension
+ *   claims. A refusal is never silent: shipping a non-image file to Perplexity
+ *   is exactly what the checks exist to prevent.
+ */
+async function readLocalImageQuery(path, options) {
+  const resolvedPath = resolve(path)
+  if (!isWithinImageRoots(resolvedPath, options.imageRoots)) {
+    throw new WebError(
+      `The image query "${path}" is outside the configured imageRoots `
+      + `(${options.imageRoots.join(', ')}). Add that directory to `
+      + 'web-search-perplexity.imageRoots, or pass a public https image URL instead.',
+      'WEB_PROVIDER_ERROR',
+    )
+  }
+
+  let stats
+  try {
+    stats = await stat(resolvedPath)
+  } catch {
+    // Not an existing file: an ordinary text query, not a failed image one.
+    return { kind: 'text' }
+  }
+  if (!stats.isFile()) return { kind: 'text' }
+  const extension = resolvedPath.slice(resolvedPath.lastIndexOf('.')).toLowerCase()
+  let claimed = IMAGE_MEDIA_TYPE_BY_EXTENSION[extension]
+  if (claimed === undefined) {
+    // No extension at all can still be an image (normalized attachment objects
+    // are content-addressed and carry none); a wrong or non-image extension is
+    // an ordinary query, not an image to read.
+    if (extension.startsWith('.')) return { kind: 'text' }
+    claimed = 'image/png'
+  }
+  if (stats.size > options.imageMaxBytes) {
+    throw new WebError(
+      `The image query "${path}" is ${stats.size} bytes, above imageMaxBytes `
+      + `(${options.imageMaxBytes}). Lower the image resolution or raise `
+      + 'web-search-perplexity.imageMaxBytes (the Perplexity per-image cap is 50 MB).',
+      'WEB_PROVIDER_ERROR',
+    )
+  }
+  const bytes = await readFile(resolvedPath)
+  const mediaType = sniffImageMediaType(bytes) ?? undefined
+  if (mediaType === undefined || mediaType !== claimed) {
+    // The path exists and is not confidently this image format: treat an
+    // unrecognized file as text rather than shipping an arbitrary document.
+    if (extension in IMAGE_MEDIA_TYPE_BY_EXTENSION) {
+      throw new WebError(
+        `The image query "${path}" has an ${extension} extension but its bytes are not `
+        + `${claimed}. Rename the file to its real format, or pass a public https image URL.`,
+        'WEB_PROVIDER_ERROR',
+      )
+    }
+    return { kind: 'text' }
+  }
+  return {
+    kind: 'image',
+    mediaType,
+    dataUri: `data:${mediaType};base64,${Buffer.from(bytes).toString('base64')}`,
+    bytes: bytes.length,
+  }
+}
+
+/**
+ * Classify one query as an image to attach or as ordinary search text.
+ *
+ * @param {string} query - one `web_search` query.
+ * @param {object} options - resolved provider options.
+ * @returns {Promise<{kind: 'image', source: string, mediaType?: string, dataUri: string, bytes?: number}
+ *   | {kind: 'text'}>} the classification; `dataUri` is the URL itself for a URL image.
+ */
+async function classifyImageQuery(query, options) {
+  const text = typeof query === 'string' ? query.trim() : ''
+  if (text.length === 0) return { kind: 'text' }
+  if (IMAGE_URL_PATTERN.test(text)) return { kind: 'image', source: text, dataUri: text }
+  if (text.startsWith('http://') || text.startsWith('https://') || text.startsWith('//')) {
+    // A web address never names a local file, whatever its extension.
+    return { kind: 'text' }
+  }
+  const looksLikeLocalPath = LOCAL_IMAGE_PATH_PATTERN.test(text) || isAbsolute(text)
+  if (!looksLikeLocalPath) return { kind: 'text' }
+  const read = await readLocalImageQuery(text, options)
+  return read.kind === 'image' ? { ...read, source: text } : read
+}
+
+/**
+ * Build the request body for one image-bearing search, separating the text
+ * question (a non-image query in the same call) from the attached images.
+ *
+ * @param {string[]} queries - the queries of one search call.
+ * @param {object} options - resolved provider options.
+ * @returns {Promise<{body: object, marker: object}|undefined>} the `input` message
+ *   array plus its model-facing marker, or `undefined` when this call carries no
+ *   image.
+ */
+async function buildImageRequest(queries, options) {
+  if (!options.imageInput) return undefined
+  const classified = []
+  for (const query of queries) classified.push(await classifyImageQuery(query, options))
+  const images = classified.filter((item) => item.kind === 'image')
+  if (images.length === 0) return undefined
+  const textQueries = queries.filter((_, index) => classified[index]?.kind !== 'image')
+  const question = textQueries.join('\n').trim()
+    || 'Analyze this image and research what it shows using web sources.'
+  const marker = {
+    images: images.length,
+    source: images.map((image) => image.source),
+    bytes: images.reduce((total, image) => total + (image.bytes ?? 0), 0),
+  }
+
+  return {
+    marker,
+    body: {
+      input: [{
+        role: 'user',
+        content: [
+          { type: 'input_text', text: question },
+          ...images.map((image) => ({ type: 'input_image', image_url: image.dataUri })),
+        ],
+      }],
+    },
+  }
+}
+
+/**
+ * The Agent API `web_search` tool entry: its type plus every configured filter.
+ * `searchRecency` is the same `day`/`week`/`month`/`year` window the Sonar API
+ * used to take as a top-level `search_recency_filter`; on the Agent API it
+ * belongs to the tool that performs the search.
+ *
+ * @param {object} options - resolved provider options.
+ * @returns {object} the tool entry for the request's `tools` array.
+ */
+function webSearchTool(options) {
+  return {
+    type: 'web_search',
+    ...(options.searchRecency !== undefined
+      ? { filters: { search_recency_filter: options.searchRecency } }
+      : {}),
+  }
+}
+
+/**
+ * Attach the model-facing image marker to a mapped response. `content` is the
+ * only field `dsh-tool-web` forwards to the model, so the marker line is what
+ * tells it which image was analyzed.
+ */
+function withImageMarker(mapped, marker) {
+  const line = `${IMAGE_MARKER_PREFIX}${JSON.stringify(marker)}`
+  return {
+    ...mapped,
+    content: mapped.content !== undefined && mapped.content.length > 0
+      ? `${line}\n\n${mapped.content}`
+      : line,
+  }
+}
+
 /**
  * Project the current settings section into the options the provider serves
  * its next search with. `ctx` supplies the credentials domain, which is where
@@ -260,14 +520,19 @@ function resolveOptions(ctx, config) {
   const literalApiKey = typeof c.apiKey === 'string' && c.apiKey.length > 0
     ? c.apiKey
     : undefined
-  const apiMode = API_MODES.includes(c.apiMode) ? c.apiMode : DEFAULT_API_MODE
-  const rawModel = typeof c.model === 'string' && c.model.length > 0 ? c.model : DEFAULT_MODEL
-  // Agent API model ids are `provider/model` slugs. If the configured model is
-  // a Sonar-era id (no `/`), fall back to a valid Agent API model.
-  const model = apiMode === 'agent' && !rawModel.includes('/') ? AGENT_DEFAULT_MODEL : rawModel
-  // With an Agent preset, the model is only sent as an explicit override when
-  // the user actually configured a `provider/model` slug.
-  const agentModelOverride = apiMode === 'agent' && rawModel.includes('/') ? rawModel : undefined
+  // The Search API is a second, independent backend in this same plugin, so
+  // which one is usable is decided here rather than by registering both (two
+  // usable providers would make the seam's selection ambiguous). It is opt-in:
+  // an unset or unknown value leaves the Agent API in place.
+  const searchApi = typeof c.searchProvider === 'string' && c.searchProvider.trim() === SEARCH_API_PROVIDER_ID
+  const rawModel = typeof c.model === 'string' && c.model.length > 0 ? c.model : AGENT_DEFAULT_MODEL
+  // Agent API model ids are `provider/model` slugs. A configured id without one
+  // is not an Agent API model, so it falls back rather than being sent to fail.
+  const model = rawModel.includes('/') ? rawModel : AGENT_DEFAULT_MODEL
+  // With a preset, `model` is only sent as an explicit override when one was
+  // configured. The built-in default is a fallback for the preset-less request,
+  // not an override of a preset.
+  const configuredModel = typeof c.model === 'string' && c.model.includes('/') ? c.model : undefined
   const preset = AGENT_PRESETS.includes(c.preset) ? c.preset : ''
   // An explicit `softTimeoutMs` always wins — including 0, which disables the
   // deadline. Otherwise the deadline follows the configured preset's measured
@@ -275,77 +540,44 @@ function resolveOptions(ctx, config) {
   const softTimeoutMs = Number.isInteger(c.softTimeoutMs) && c.softTimeoutMs >= 0
     ? c.softTimeoutMs
     : defaultSoftTimeoutMsFor(preset)
+  // Image input is on unless it was explicitly switched off.
+  const imageInput = c.imageInput === undefined
+    || (typeof c.imageInput === 'string' && !['off', 'false', '0'].includes(c.imageInput.trim().toLowerCase()))
+  // An image request gets the text deadline plus the analysis margin, capped
+  // where the degraded retry still fits the tool budget, and `0` stays `0` so
+  // disabling the deadline disables it for images too. This is deliberately not
+  // a separate setting: two deadlines side by side invite a configuration where
+  // the image one is wrong for the text one.
+  const imageDeadlineMs = softTimeoutMs === 0
+    ? 0
+    : Math.min(softTimeoutMs + IMAGE_ANALYSIS_MARGIN_MS, MAX_SOFT_TIMEOUT_MS)
   return {
     apiKey: literalApiKey,
     apiKeyEnv,
-    apiMode,
-    agentModelOverride,
+    searchApi,
+    agentModelOverride: configuredModel,
     preset,
     baseURL: typeof c.baseURL === 'string' && c.baseURL.length > 0 ? c.baseURL : DEFAULT_BASE_URL,
     model,
     maxTokens: Number.isInteger(c.maxTokens) && c.maxTokens > 0 ? c.maxTokens : DEFAULT_MAX_TOKENS,
+    // Sent as the web_search tool's `filters.search_recency_filter`.
     searchRecency: SEARCH_RECENCY_VALUES.includes(c.searchRecency) ? c.searchRecency : undefined,
     // 0 disables the soft deadline, restoring the single-request behavior.
     softTimeoutMs,
+    imageInput,
+    imageMaxBytes: Number.isInteger(c.imageMaxBytes) && c.imageMaxBytes > 0
+      ? c.imageMaxBytes
+      : DEFAULT_IMAGE_MAX_BYTES,
+    imageRoots: Array.isArray(c.imageRoots)
+      ? c.imageRoots.filter((root) => typeof root === 'string' && root.length > 0).map((root) => resolve(root))
+      : [],
+    imageDeadlineMs,
     // Only a fast synchronous preset is a useful degraded retry: `wide-research`
     // is a minutes-long background workflow by design, not a latency fallback.
     fallbackPreset: AGENT_PRESETS.includes(c.fallbackPreset) && c.fallbackPreset !== 'wide-research'
       ? c.fallbackPreset
       : DEFAULT_FALLBACK_PRESET,
-    async resolveApiKey() {
-      if (literalApiKey !== undefined) return literalApiKey
-      const credentials = ctx.get('credentials')
-      if (credentials !== undefined) {
-        try {
-          const resolved = await credentials.resolve(apiKeyEnv)
-          const value = resolved?.value
-          if (typeof value === 'string' && value.length > 0) return value
-        } catch {
-          // fall through to the ambient process environment
-        }
-      }
-      const ambient = process.env[apiKeyEnv]
-      return typeof ambient === 'string' && ambient.length > 0 ? ambient : undefined
-    },
   }
-}
-
-function retryAfterMs(header) {
-  if (typeof header !== 'string' || header.length === 0) return undefined
-  const seconds = Number(header)
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000
-  const date = Date.parse(header)
-  if (!Number.isNaN(date)) return Math.max(0, date - Date.now())
-  return undefined
-}
-
-function sleep(ms, signal) {
-  return new Promise((resolve, reject) => {
-    let timer
-    const onAbort = () => {
-      // `undefined` before the timer exists, and `clearTimeout(undefined)` is a
-      // no-op, so the already-aborted path below can share this handler.
-      clearTimeout(timer)
-      const error = new Error('aborted')
-      error.name = 'AbortError'
-      reject(error)
-    }
-    // A signal that is already aborted never fires `abort` again, so without this
-    // check the caller would wait out the full backoff and only then learn it had
-    // been cancelled — the 429 path can pass an already-aborted signal when the
-    // soft deadline expires just as a retry begins.
-    if (signal !== undefined && signal.aborted) {
-      onAbort()
-      return
-    }
-    timer = setTimeout(() => {
-      if (signal !== undefined) signal.removeEventListener('abort', onAbort)
-      resolve()
-    }, ms)
-    if (signal !== undefined) {
-      signal.addEventListener('abort', onAbort, { once: true })
-    }
-  })
 }
 
 /** Abort reason marking OUR soft deadline, distinct from an outer cancellation. */
@@ -390,7 +622,7 @@ function softDeadline(outerSignal, ms) {
 function agentRequestBody(request, options, preset) {
   const body = {
     input: request.query,
-    tools: [{ type: 'web_search' }],
+    tools: [webSearchTool(options)],
     ...(Number.isInteger(options.maxTokens) && options.maxTokens > 0
       ? { max_output_tokens: options.maxTokens }
       : {}),
@@ -398,12 +630,37 @@ function agentRequestBody(request, options, preset) {
   if (preset !== '') {
     body.preset = preset
     // With a preset, `model` is optional and only sent as an explicit override
-    // when the user explicitly configured a `provider/model` slug.
+    // when the user actually configured a `provider/model` slug. The built-in
+    // default model is a fallback for the preset-less case, not an override, so
+    // it must not be sent alongside a preset.
     if (options.agentModelOverride !== undefined) body.model = options.agentModelOverride
   } else {
     body.model = options.model
   }
   return body
+}
+
+/**
+ * Complete an image-bearing Agent API body with the search tool and token cap.
+ *
+ * The model selector is the same one a text request uses: the configured preset
+ * when there is one, otherwise the configured model. An image request therefore
+ * cannot disagree with a text request about which model answers.
+ *
+ * @param body - the image message array.
+ * @param options - resolved provider options.
+ * @param preset - the preset the caller would otherwise send.
+ * @returns the complete Agent API request body.
+ */
+function agentImageRequestBody(body, options, preset) {
+  return {
+    ...body,
+    tools: [webSearchTool(options)],
+    ...(preset !== '' ? { preset } : { model: options.model }),
+    ...(Number.isInteger(options.maxTokens) && options.maxTokens > 0
+      ? { max_output_tokens: options.maxTokens }
+      : {}),
+  }
 }
 
 /**
@@ -457,75 +714,20 @@ function degradedAgentResult(data, options) {
   }
 }
 
-/** POST one Perplexity JSON request and return the parsed response body. */
-async function requestJson(url, apiKey, body, signal, retries = 2) {
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    let response
-    try {
-      response = await fetch(url, {
-        method: 'POST',
-        redirect: 'error',
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          'content-type': 'application/json',
-          accept: 'application/json',
-          'user-agent': USER_AGENT,
-        },
-        body: JSON.stringify(body),
-        ...(signal !== undefined ? { signal } : {}),
-      })
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw new WebError('Perplexity search aborted', 'WEB_ABORTED', { cause: error })
-      }
-      throw new WebError(`Perplexity search request failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
-    }
-
-    if (response.ok) {
-      try {
-        return await response.json()
-      } catch (error) {
-        if (isAbortError(error)) {
-          throw new WebError('Perplexity search aborted', 'WEB_ABORTED', { cause: error })
-        }
-        throw new WebError(
-          `Perplexity returned an unprocessable response body: ${String(error)}`,
-          'WEB_PROVIDER_ERROR',
-          { cause: error },
-        )
-      }
-    }
-
-    if (response.status === 429 && attempt < retries) {
-      // Honor Retry-After when present, otherwise back off briefly. This is
-      // what makes a first-call 429 self-heal instead of surfacing as an error.
-      const waitMs = Math.min(retryAfterMs(response.headers.get('retry-after')) ?? 1000 * (2 ** attempt), 10_000)
-      try {
-        await sleep(waitMs, signal)
-      } catch (error) {
-        if (isAbortError(error)) {
-          throw new WebError('Perplexity search aborted', 'WEB_ABORTED', { cause: error })
-        }
-        throw error
-      }
-      continue
-    }
-
-    let message = `Perplexity API error (HTTP ${response.status})`
-    try {
-      const parsed = await response.json()
-      const detail = typeof parsed.error === 'string'
-        ? parsed.error
-        : parsed.error?.message ?? parsed.message
-      if (detail !== undefined && String(detail).length > 0) message = String(detail)
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw new WebError('Perplexity search aborted', 'WEB_ABORTED', { cause: error })
-      }
-    }
-    throw new WebError(message, 'WEB_PROVIDER_ERROR')
-  }
-  throw new WebError('Perplexity API error (HTTP 429)', 'WEB_PROVIDER_ERROR')
+/**
+ * POST one Perplexity Agent API request. Transport, redirect rejection, retry,
+ * and abort classification live in {@link postJson}, shared with the Search API
+ * provider.
+ *
+ * @param url - absolute endpoint URL.
+ * @param apiKey - bearer credential.
+ * @param body - request body.
+ * @param signal - optional cancellation signal.
+ * @param retries - how many times a 429 may be retried.
+ * @returns the parsed response body.
+ */
+function requestJson(url, apiKey, body, signal, retries = 2) {
+  return postJson(url, apiKey, body, signal, WebError, 'Perplexity search', retries)
 }
 
 /**
@@ -551,10 +753,23 @@ export function apply(ctx, config = {}) {
     skills.register(PERPLEXITY_RESEARCH_SKILL)
   }
 
+  // Both backends are registered, but only one reports itself usable at a time:
+  // each `available()` consults `searchProvider`, so switching in the settings UI
+  // takes effect on the next search instead of requiring a restart. Registration
+  // alone cannot decide this, because the seam resolves the provider per call.
+  ctx.web.registerSearchProvider(new PerplexitySearchApiProvider(
+    ctx,
+    current,
+    () => resolveOptions(ctx, current()).searchApi,
+  ))
+
   ctx.web.registerSearchProvider({
     id: 'perplexity',
     available() {
       const options = resolveOptions(ctx, current())
+      // Only the Agent backend is usable when it is the configured one: two
+      // usable providers would make the seam's selection ambiguous.
+      if (options.searchApi) return false
       const hasCredentialsService = ctx.get('credentials') !== undefined
       const hasAmbientKey = typeof process.env[options.apiKeyEnv] === 'string'
         && process.env[options.apiKeyEnv].length > 0
@@ -567,9 +782,7 @@ export function apply(ctx, config = {}) {
     },
     async search(request, signal) {
       const options = resolveOptions(ctx, current())
-      const apiKey = (typeof options.apiKey === 'string' && options.apiKey.length > 0)
-        ? options.apiKey
-        : await options.resolveApiKey()
+      const apiKey = await resolveApiKey(ctx, options.apiKey, options.apiKeyEnv)
       if (apiKey === undefined || apiKey.length === 0) {
         throw new WebError(
           'Perplexity API key is not configured. Set PERPLEXITY_API_KEY, '
@@ -579,78 +792,86 @@ export function apply(ctx, config = {}) {
         )
       }
 
-      if (options.apiMode === 'agent') {
-        const url = `${options.baseURL}/v1/agent`
+      // A query naming an image (local file or public https URL) becomes the
+      // request's image content; every other query stays the text question.
+      const imageRequest = await buildImageRequest([request.query], options)
+      const url = `${options.baseURL}/v1/agent`
+      const preset = options.preset
 
-        // No soft deadline configured: one request, exactly as before.
-        if (!(options.softTimeoutMs > 0)) {
-          const data = await requestJson(url, apiKey, agentRequestBody(request, options, options.preset), signal)
-          return {
-            ...mapAgentResponse(data),
-            degradation: degradationStatus(options.preset, options.preset, 0),
-          }
-        }
-
-        const primary = softDeadline(signal, options.softTimeoutMs)
-        let primaryData
-        let softTimedOut = false
-        try {
-          primaryData = await requestJson(
-            url, apiKey, agentRequestBody(request, options, options.preset), primary.signal)
-        } catch (error) {
-          // Only OUR deadline may degrade the answer. An outer cancellation is
-          // the harness tool budget: no time is left for a retry. Any other
-          // error is a real provider failure, not a latency problem.
-          if (!primary.expired() || (signal !== undefined && signal.aborted)) throw error
-          softTimedOut = true
-        } finally {
-          primary.clear()
-        }
-        if (!softTimedOut) {
-          return {
-            ...mapAgentResponse(primaryData),
-            degradation: degradationStatus(options.preset, options.preset, options.softTimeoutMs),
-          }
-        }
-
-        // Degraded retry: a shallow answer inside the budget beats the opaque
-        // `tool call timed out` result the caller would otherwise receive.
-        const fallback = softDeadline(signal, FALLBACK_TIMEOUT_MS)
-        try {
-          const data = await requestJson(
-            url, apiKey, agentRequestBody(request, options, options.fallbackPreset), fallback.signal, 1)
-          return degradedAgentResult(data, options)
-        } catch (error) {
-          if (fallback.expired() && !(signal !== undefined && signal.aborted)) {
-            throw new WebError(
-              `Perplexity agent search passed its ${Math.round(options.softTimeoutMs / 1000)}s soft deadline, and the `
-              + `"${options.fallbackPreset}" fallback did not finish within `
-              + `${Math.round(FALLBACK_TIMEOUT_MS / 1000)}s. Retry with a narrower, single-fact query, or set `
-              + `web-search-perplexity.preset to "${options.fallbackPreset}" — raise softTimeoutMs together with `
-              + 'the web_search tool budget if full-depth research is required.',
-              'WEB_PROVIDER_ERROR', { cause: error })
-          }
-          throw error
-        } finally {
-          fallback.clear()
+      // No soft deadline configured: one request, exactly as before.
+      if (!(options.softTimeoutMs > 0)) {
+        const body = imageRequest !== undefined
+          ? agentImageRequestBody(imageRequest.body, options, preset)
+          : agentRequestBody(request, options, options.preset)
+        const data = await requestJson(url, apiKey, body, signal)
+        const mapped = imageRequest !== undefined
+          ? withImageMarker(mapAgentResponse(data), imageRequest.marker)
+          : mapAgentResponse(data)
+        return {
+          ...mapped,
+          ...(imageRequest !== undefined ? { images: imageRequest.marker } : {}),
+          degradation: degradationStatus(options.preset, options.preset, 0),
         }
       }
 
-      const data = await requestJson(
-        `${options.baseURL}/chat/completions`,
-        apiKey,
-        {
-          model: options.model,
-          max_tokens: options.maxTokens,
-          messages: [{ role: 'user', content: request.query }],
-          ...(options.searchRecency !== undefined ? { search_recency_filter: options.searchRecency } : {}),
-        },
-        signal,
-      )
-      return {
-        ...mapPerplexityResponse(data),
-        // Sonar mode has no preset, so nothing can degrade.
-        degradation: degradationStatus('', '', 0),
+      const deadlineMs = imageRequest !== undefined ? options.imageDeadlineMs : options.softTimeoutMs
+      const primary = softDeadline(signal, deadlineMs)
+      let primaryData
+      let softTimedOut = false
+      try {
+        if (imageRequest !== undefined) {
+          primaryData = await requestJson(
+            url, apiKey, agentImageRequestBody(imageRequest.body, options, preset), primary.signal)
+        } else {
+          primaryData = await requestJson(
+            url, apiKey, agentRequestBody(request, options, options.preset), primary.signal)
+        }
+      } catch (error) {
+        // Only OUR deadline may degrade the answer. An outer cancellation is
+        // the harness tool budget: no time is left for a retry. Any other
+        // error is a real provider failure, not a latency problem.
+        if (!primary.expired() || (signal !== undefined && signal.aborted)) throw error
+        softTimedOut = true
+      } finally {
+        primary.clear()
+      }
+      if (!softTimedOut) {
+        const mapped = imageRequest !== undefined
+          ? withImageMarker(mapAgentResponse(primaryData), imageRequest.marker)
+          : mapAgentResponse(primaryData)
+        return {
+          ...mapped,
+          ...(imageRequest !== undefined ? { images: imageRequest.marker } : {}),
+          degradation: degradationStatus(preset, preset, deadlineMs),
+        }
+      }
+
+      // The degraded retry: a shallow answer inside the budget beats the opaque
+      // `tool call timed out` result the caller would otherwise receive.
+      const fallback = softDeadline(signal, FALLBACK_TIMEOUT_MS)
+      try {
+        const body = imageRequest !== undefined
+          ? agentImageRequestBody(imageRequest.body, options, preset)
+          : agentRequestBody(request, options, options.fallbackPreset)
+        const data = await requestJson(url, apiKey, body, fallback.signal, 1)
+        const mapped = degradedAgentResult(data, { ...options, preset })
+        return imageRequest !== undefined
+          ? { ...withImageMarker(mapped, imageRequest.marker), images: imageRequest.marker }
+          : mapped
+      } catch (error) {
+        if (fallback.expired() && !(signal !== undefined && signal.aborted)) {
+          throw new WebError(
+            `Perplexity agent search passed its ${Math.round(deadlineMs / 1000)}s soft deadline, and the `
+            + `"${options.fallbackPreset}" fallback did not finish within `
+            + `${Math.round(FALLBACK_TIMEOUT_MS / 1000)}s. Retry with a narrower, single-fact query, or set `
+            + `web-search-perplexity.preset to "${options.fallbackPreset}" — raise `
+            + 'softTimeoutMs together with the web_search tool budget if full-depth '
+            + 'research is required.',
+            'WEB_PROVIDER_ERROR', { cause: error })
+        }
+        throw error
+      } finally {
+        fallback.clear()
       }
     },
   })

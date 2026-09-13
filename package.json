@@ -1,6 +1,6 @@
 {
   "name": "@shjwudp/dsh-web-search-perplexity",
-  "version": "0.1.6-rc.1",
+  "version": "0.1.7-rc.1",
   "description": "Standalone Perplexity search provider for the DeepSeek Harness web seam (ctx.web). No internal-only dependencies; reads PERPLEXITY_API_KEY from the environment.",
   "type": "module",
   "main": "src/index.js",
@@ -31,8 +31,8 @@
     }
   },
   "scripts": {
-    "check": "node --check src/index.js && node --check src/client.js && node --check src/skill.js",
-    "test": "node test/soft-deadline.test.mjs && node test/client-locale.test.mjs && node test/client-save.test.mjs",
+    "check": "node --check src/index.js && node --check src/client.js && node --check src/skill.js && node --check src/shared.js && node --check src/search-api.js",
+    "test": "node test/soft-deadline.test.mjs && node test/image-input.test.mjs && node test/search-api.test.mjs && node test/client-locale.test.mjs && node test/client-save.test.mjs",
     "build:skill": "node scripts/build-skill.mjs",
     "sync:profile": "node scripts/sync-profile.mjs",
     "prepack": "npm run build:skill"

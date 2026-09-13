@@ -5,7 +5,7 @@ This repository is a standalone DeepSeek Harness plugin
 `WebSearchProvider` into `ctx.web`. The runtime surface is small:
 
 - `src/index.js` — host provider, settings namespace, response mapping
-- `src/client.js` — browser half (read-only settings card)
+- `src/client.js` — browser half (editable settings card)
 - `cordis.patch.yml` — bundled loader patch (inserts the plugin row)
 - `package.json` — package metadata, `dsh.bundle`, `dsh.client`, peer deps
 

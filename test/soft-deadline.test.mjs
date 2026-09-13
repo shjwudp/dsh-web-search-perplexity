@@ -153,7 +153,6 @@ function agentOk(text) {
 
 const baseConfig = {
   apiKey: 'test-key',
-  apiMode: 'agent',
   preset: 'medium',
   baseURL: 'https://api.perplexity.ai',
   maxTokens: 100,

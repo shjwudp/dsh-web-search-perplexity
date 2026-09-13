@@ -64,7 +64,7 @@ function makeController(scopeOverrides = {}) {
     getSnapshot: () => ({
       status: 'ready',
       writable: true,
-      value: { apiMode: 'agent', preset: 'medium', maxTokens: 100, apiKeyEnv: 'PERPLEXITY_API_KEY', ...user },
+      value: { preset: 'medium', maxTokens: 100, apiKeyEnv: 'PERPLEXITY_API_KEY', ...user },
       base: {},
       user,
     }),

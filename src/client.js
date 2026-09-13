@@ -3,8 +3,9 @@
  *
  * Registers an editable `Perplexity web search` card in
  * Settings → Plugins → Plugin configuration, keyed by the
- * `web-search-perplexity` settings namespace. The card edits baseURL, model,
- * maxTokens, and searchRecency through the settings scope; the API key is a
+ * `web-search-perplexity` settings namespace. The card edits baseURL, preset,
+ * model, maxTokens, searchRecency, the Agent-mode soft deadline and its fallback
+ * preset, and the image settings through the settings scope; the API key is a
  * write-only secret field backed by the credentials domain (never echoed).
  *
  * Defensive: if a required service or slot is unavailable in a given
@@ -25,8 +26,9 @@ window.__ModuleLoader__.load({
       /**
        * UI copy for the settings card. `zh` is complete and `en` mirrors it, as
        * `ctx.locale.register` requires every shipped locale for a namespace.
-       * Values that are themselves identifiers (`sonar-pro`, preset names, model
-       * ids) stay literal in the option tables and are not dictionary entries.
+       * Values that are themselves identifiers (preset names, `day`/`month`,
+       * Agent API model ids) stay literal in the option tables and are not
+       * dictionary entries.
        */
       const DICTS = {
         zh: {
@@ -34,17 +36,53 @@ window.__ModuleLoader__.load({
           'card.subtitle': 'ctx.web 的独立 Perplexity 搜索提供方（id: perplexity）。',
           'card.unsaved': '有未保存的修改',
           'field.baseURL': '接入地址（baseURL）',
-          'field.apiMode': 'API 模式',
+          'field.searchProvider': '搜索后端',
           'field.preset': '预设',
           'field.model': '模型',
           'field.maxTokens': '最大 token 数',
           'field.searchRecency': '搜索时效',
           'field.softTimeoutMs': '软截止时间（毫秒）',
           'field.fallbackPreset': '降级预设',
+          'field.imageInput': '图片输入',
+          'field.imageMaxBytes': '单图字节上限',
+          'field.imageRoots': '允许读取的图片目录',
           'field.apiKey': 'API 密钥',
+          'advanced.toggle': '高级设置',
+          'note.advanced': '以下通常无需改动。',
+          'field.searchType': '搜索类型',
+          'field.searchDomains': '域名过滤（最多 20 个）',
+          'field.searchLanguages': '语言过滤（ISO 639-1，最多 20 个）',
+          'field.searchCountry': '国家/地区（ISO 3166-1）',
+          'field.searchContextSize': '内容抽取体量',
+          'field.searchMaxTokensPerPage': '每页最大 token',
+          'field.searchAfterDate': '发布于该日期之后（MM/DD/YYYY）',
+          'field.searchBeforeDate': '发布于该日期之前（MM/DD/YYYY）',
+          'backend.agent': 'Agent API — 生成答案 + 引用',
+          'backend.search': 'Search API — 结构化结果，无生成答案',
+          'searchType.web': 'web — 网页搜索',
+          'searchType.people': 'people — 人物搜索',
+          'contextSize.low': 'low — 简短片段',
+          'contextSize.medium': 'medium — 均衡',
+          'contextSize.high': 'high — 详细内容',
+          'note.searchDomains': '逗号分隔，最多 20 个域名或 URL；留空表示不过滤。',
+          'note.searchLanguages': '逗号分隔的两字母 ISO 639-1 代码，例如 en, zh；留空表示不过滤。',
+          'note.searchCountry': '两字母 ISO 3166-1 代码，例如 US、GB、JP；留空表示不限定地域。',
+          'note.searchContextSize': '决定每条结果抽取多少正文返给模型。people 搜索不接受该参数，'
+            + '所以人物搜索不会发送它。',
+          'note.searchDate': '按发布时间窗口收窄结果，格式 MM/DD/YYYY；留空表示不限。',
+          'imageMode.on': '开启',
+          'imageMode.off': '关闭',
+          'note.imageInput': '开启后，把本地图片的绝对路径或公开的 https 图片地址当作一条查询传给 web_search，'
+            + '该请求会把图片连同文字问题一并发给 Perplexity 做联网研究。只有扩展名为图片、且字节确实是 '
+            + 'PNG/JPEG/GIF/WEBP 的文件才会被读取；其它文件一律拒绝，不会外发。',
+          'note.imageRoots': '逗号分隔的目录白名单；留空表示不限制。填了以后，只有这些目录内的图片会被读取。',
+          'note.imageModelFollows': '图片沿用你配置的预设（或模型）。预设自带的模型本身就能识图；'
+            + '若未配置预设，请确保所选模型能看图，否则带图请求会答错而不是报错。',
+          'placeholder.imageMaxBytes': '10485760',
+          'placeholder.imageRoots': '留空 = 不限制',
+          'placeholder.commaList': 'a.example, b.example',
+          'placeholder.optional': '默认值',
           'recency.none': '默认（不限）',
-          'mode.sonar': 'Sonar Chat Completions',
-          'mode.agent': 'Agent API',
           'preset.none': '无（手动选择模型）',
           'preset.fast': 'fast — 单事实检索',
           'preset.low': 'low — 日常研究',
@@ -81,17 +119,55 @@ window.__ModuleLoader__.load({
           'card.subtitle': 'Standalone Perplexity provider for ctx.web (id: perplexity).',
           'card.unsaved': 'Unsaved changes',
           'field.baseURL': 'Endpoint (baseURL)',
-          'field.apiMode': 'API mode',
+          'field.searchProvider': 'Search backend',
           'field.preset': 'Preset',
           'field.model': 'Model',
           'field.maxTokens': 'Max tokens',
           'field.searchRecency': 'Search recency',
           'field.softTimeoutMs': 'Soft deadline (ms)',
           'field.fallbackPreset': 'Fallback preset',
+          'field.imageInput': 'Image input',
+          'field.imageMaxBytes': 'Max bytes per image',
+          'field.imageRoots': 'Allowed image directories',
           'field.apiKey': 'API key',
+          'advanced.toggle': 'Advanced settings',
+          'note.advanced': 'Not usually needed.',
+          'field.searchType': 'Search type',
+          'field.searchDomains': 'Domain filter (max 20)',
+          'field.searchLanguages': 'Language filter (ISO 639-1, max 20)',
+          'field.searchCountry': 'Country (ISO 3166-1)',
+          'field.searchContextSize': 'Content extraction size',
+          'field.searchMaxTokensPerPage': 'Max tokens per page',
+          'field.searchAfterDate': 'Published after (MM/DD/YYYY)',
+          'field.searchBeforeDate': 'Published before (MM/DD/YYYY)',
+          'backend.agent': 'Agent API — generated answer + citations',
+          'backend.search': 'Search API — ranked results, no generated answer',
+          'searchType.web': 'web — general web search',
+          'searchType.people': 'people — people search',
+          'contextSize.low': 'low — short passages',
+          'contextSize.medium': 'medium — balanced',
+          'contextSize.high': 'high — detailed content',
+          'note.searchDomains': 'Comma-separated, up to 20 domains or URLs; empty means no filter.',
+          'note.searchLanguages': 'Comma-separated two-letter ISO 639-1 codes, e.g. en, zh; empty means no filter.',
+          'note.searchCountry': 'Two-letter ISO 3166-1 code, e.g. US, GB, JP; empty means no region preference.',
+          'note.searchContextSize': 'How much page content each result returns to the model. A people search does '
+            + 'not accept this parameter, so people searches omit it.',
+          'note.searchDate': 'Narrow results by publication window, MM/DD/YYYY; empty means no bound.',
+          'imageMode.on': 'Enabled',
+          'imageMode.off': 'Disabled',
+          'note.imageInput': 'When enabled, a query that is an absolute local image path or a public https image '
+            + 'URL is sent to Perplexity as that image plus the text question, for web-grounded analysis. Only files '
+            + 'whose extension names an image and whose bytes really are PNG/JPEG/GIF/WEBP are read; anything else is '
+            + 'refused rather than sent.',
+          'note.imageRoots': 'Comma-separated directory allowlist; empty means no restriction.',
+          'note.imageModelFollows': 'Images use your configured preset (or model); a preset\''
+            + 's own model already reads images. With no preset set, pick a model that can read images, '
+            + 'or an image request answers badly rather than failing.',
+          'placeholder.imageMaxBytes': '10485760',
+          'placeholder.imageRoots': 'empty = no restriction',
+          'placeholder.commaList': 'a.example, b.example',
+          'placeholder.optional': 'default',
           'recency.none': 'Default (none)',
-          'mode.sonar': 'Sonar Chat Completions',
-          'mode.agent': 'Agent API',
           'preset.none': 'None (choose model manually)',
           'preset.fast': 'fast — single-fact lookups',
           'preset.low': 'low — everyday research',
@@ -135,15 +211,33 @@ window.__ModuleLoader__.load({
         { value: 'month', label: 'month' },
         { value: 'year', label: 'year' },
       ]
-      const MODEL_OPTIONS = [
-        { value: 'sonar', label: 'sonar' },
-        { value: 'sonar-pro', label: 'sonar-pro' },
-        { value: 'sonar-reasoning-pro', label: 'sonar-reasoning-pro' },
-        { value: 'sonar-deep-research', label: 'sonar-deep-research' },
+      /**
+       * Recency windows for the Search API, which additionally accepts `hour`.
+       * The Agent API's `web_search` tool filter does not.
+       */
+      const SEARCH_RECENCY_OPTIONS = [
+        { value: '', labelKey: 'recency.none' },
+        { value: 'hour', label: 'hour' },
+        ...RECENCY_OPTIONS.slice(1),
       ]
-      const API_MODE_OPTIONS = [
-        { value: 'sonar', labelKey: 'mode.sonar' },
-        { value: 'agent', labelKey: 'mode.agent' },
+      /** Blank enables image input; only an explicit "off" disables it. */
+      const IMAGE_INPUT_OPTIONS = [
+        { value: '', labelKey: 'imageMode.on' },
+        { value: 'off', labelKey: 'imageMode.off' },
+      ]
+      /** Which of the plugin's two backends serves searches; blank = Agent API. */
+      const BACKEND_OPTIONS = [
+        { value: '', labelKey: 'backend.agent' },
+        { value: 'perplexity-search', labelKey: 'backend.search' },
+      ]
+      const SEARCH_TYPE_OPTIONS = [
+        { value: 'web', labelKey: 'searchType.web' },
+        { value: 'people', labelKey: 'searchType.people' },
+      ]
+      const CONTEXT_SIZE_OPTIONS = [
+        { value: 'low', labelKey: 'contextSize.low' },
+        { value: 'medium', labelKey: 'contextSize.medium' },
+        { value: 'high', labelKey: 'contextSize.high' },
       ]
       const PRESET_OPTIONS = [
         { value: '', labelKey: 'preset.none' },
@@ -325,6 +419,21 @@ window.__ModuleLoader__.load({
           cursor: 'pointer',
         },
         note: { color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 },
+        advanced: { padding: '4px 0' },
+        summary: {
+          cursor: 'pointer',
+          color: 'var(--dsw-alias-label-secondary)',
+          fontSize: 13,
+          padding: '4px 0',
+        },
+        advancedBody: {
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+          borderLeft: '.5px solid var(--dsw-alias-border-l2)',
+          paddingLeft: 12,
+          marginTop: 4,
+        },
         error: { color: 'var(--dsw-alias-label-error)' },
       }
 
@@ -366,6 +475,24 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * Comma-separated directory list, stored as a settings array. A comma is
+       * the separator because a Windows or POSIX path may not contain one.
+       */
+      function listField(field) {
+        return {
+          field,
+          format: (value) => (Array.isArray(value) ? value.join(', ') : ''),
+          parse: (text) => {
+            const roots = String(text ?? '')
+              .split(',')
+              .map((entry) => entry.trim())
+              .filter((entry) => entry !== '')
+            return roots.length === 0 ? { kind: 'clear' } : { kind: 'set', value: roots }
+          },
+        }
+      }
+
       function selectField(field, options) {
         return {
           field,
@@ -386,13 +513,24 @@ window.__ModuleLoader__.load({
           this.ctx = ctx
           this.specs = new Map([
             textField('baseURL'),
-            selectField('apiMode', API_MODE_OPTIONS),
             selectField('preset', PRESET_OPTIONS),
             textField('model'),
             numberField('maxTokens'),
             selectField('searchRecency', RECENCY_OPTIONS),
             nonNegativeNumberField('softTimeoutMs'),
             selectField('fallbackPreset', FALLBACK_PRESET_OPTIONS),
+            selectField('imageInput', IMAGE_INPUT_OPTIONS),
+            numberField('imageMaxBytes'),
+            listField('imageRoots'),
+            selectField('searchProvider', BACKEND_OPTIONS),
+            selectField('searchType', SEARCH_TYPE_OPTIONS),
+            listField('searchDomains'),
+            listField('searchLanguages'),
+            textField('searchCountry'),
+            selectField('searchContextSize', CONTEXT_SIZE_OPTIONS),
+            numberField('searchMaxTokensPerPage'),
+            textField('searchAfterDate'),
+            textField('searchBeforeDate'),
           ].map((spec) => [spec.field, spec]))
           this.staged = new Map()
           this.listeners = new Set()
@@ -428,13 +566,24 @@ window.__ModuleLoader__.load({
             failed: this.failed,
             lastError: this.lastError,
             baseURL: this.field('baseURL'),
-            apiMode: this.field('apiMode'),
             preset: this.field('preset'),
             model: this.field('model'),
             maxTokens: this.field('maxTokens'),
             searchRecency: this.field('searchRecency'),
             softTimeoutMs: this.field('softTimeoutMs'),
             fallbackPreset: this.field('fallbackPreset'),
+            imageInput: this.field('imageInput'),
+            imageMaxBytes: this.field('imageMaxBytes'),
+            imageRoots: this.field('imageRoots'),
+            searchProvider: this.field('searchProvider'),
+            searchType: this.field('searchType'),
+            searchDomains: this.field('searchDomains'),
+            searchLanguages: this.field('searchLanguages'),
+            searchCountry: this.field('searchCountry'),
+            searchContextSize: this.field('searchContextSize'),
+            searchMaxTokensPerPage: this.field('searchMaxTokensPerPage'),
+            searchAfterDate: this.field('searchAfterDate'),
+            searchBeforeDate: this.field('searchBeforeDate'),
             apiKeyText: this.staged.get('apiKey')?.text ?? '',
             apiKeyConfigured: this.credential.configured,
             apiKeyWritable: this.credential.writable,
@@ -676,8 +825,23 @@ window.__ModuleLoader__.load({
         )
       }
 
-      function SecretField(props) {
-        const state = props.state
+      /**
+       * One collapsed disclosure for the settings an ordinary deployment never
+       * touches. The card opens on the choices that decide behaviour — which
+       * backend, which preset or search type, whether images are read — and the
+       * tuning lives one click away instead of competing for attention.
+       *
+       * @param props - `t` for the summary label, and the children to disclose.
+       * @returns the disclosure element.
+       */
+      function AdvancedSection(props) {
+        return h('details', { style: styles.advanced },
+          h('summary', { style: styles.summary }, props.t('advanced.toggle')),
+          h('div', { style: styles.advancedBody }, props.children),
+        )
+      }
+
+      function SecretField(props) {        const state = props.state
         return h('div', { style: styles.field },
           h('label', { style: styles.label }, props.t('field.apiKey')),
           h('div', { style: styles.row },
@@ -703,16 +867,16 @@ window.__ModuleLoader__.load({
         // dictionary keeps the card readable if this seam ever stops forwarding it.
         const t = typeof props.t === 'function' ? props.t : (key) => EN[key] ?? key
         const disabled = !state.available || !state.writable || state.saving
-        const isAgent = state.apiMode.text === 'agent'
-        const agentModelText = isAgent && !state.model.text.includes('/')
-          ? AGENT_DEFAULT_MODEL
-          : state.model.text
-        const modelState = isAgent && !state.model.text.includes('/')
-          ? { ...state.model, text: AGENT_DEFAULT_MODEL }
-          : state.model
+        const isSearchApi = state.searchProvider.text === 'perplexity-search'
+        const configuredModel = state.model.text.includes('/')
+          ? state.model.text
+          : AGENT_DEFAULT_MODEL
+        const modelState = state.model.text.includes('/')
+          ? state.model
+          : { ...state.model, text: AGENT_DEFAULT_MODEL }
         const summary = [
-          state.apiMode.text || 'agent',
-          state.preset.text || agentModelText || 'sonar',
+          isSearchApi ? 'perplexity-search' : 'agent',
+          isSearchApi ? state.searchType.text || 'web' : state.preset.text || configuredModel,
           state.baseURL.text || 'https://api.perplexity.ai',
         ].join(' · ')
 
@@ -739,27 +903,59 @@ window.__ModuleLoader__.load({
           ),
           expanded ? h('div', { style: styles.body },
             h(Field, { t, label: t('field.baseURL'), field: 'baseURL', state: state.baseURL, disabled, edit: props.edit }),
-            h(SelectField, { t, label: t('field.apiMode'), field: 'apiMode', state: state.apiMode, disabled, edit: props.edit, options: API_MODE_OPTIONS }),
-            state.apiMode.text === 'agent'
-              ? h(SelectField, { t, label: t('field.preset'), field: 'preset', state: state.preset, disabled, edit: props.edit, options: PRESET_OPTIONS })
-              : null,
-            isAgent && state.preset.text !== ''
-              ? h('div', { style: styles.note }, t('note.presetModel', { preset: state.preset.text }))
-              : isAgent
-                ? h(SelectField, { t, label: t('field.model'), field: 'model', state: modelState, disabled, edit: props.edit, groups: agentModelGroups(t) })
-                : h(SelectField, { t, label: t('field.model'), field: 'model', state: state.model, disabled, edit: props.edit, options: MODEL_OPTIONS }),
-            h(Field, { t, label: t('field.maxTokens'), field: 'maxTokens', state: state.maxTokens, disabled, edit: props.edit, placeholder: t('placeholder.maxTokens') }),
-            state.apiMode.text === 'sonar'
-              ? h(SelectField, { t, label: t('field.searchRecency'), field: 'searchRecency', state: state.searchRecency, disabled, edit: props.edit, options: RECENCY_OPTIONS })
-              : null,
-            isAgent
-              ? h('div', null,
-                h(Field, { t, label: t('field.softTimeoutMs'), field: 'softTimeoutMs', state: state.softTimeoutMs, disabled, edit: props.edit, placeholder: t('placeholder.presetDefault') }),
-                h(SelectField, { t, label: t('field.fallbackPreset'), field: 'fallbackPreset', state: state.fallbackPreset, disabled, edit: props.edit, options: FALLBACK_PRESET_OPTIONS }),
-                h('div', { style: styles.note }, t('note.softDeadline')),
-              )
-              : null,
+            h(SelectField, { t, label: t('field.searchProvider'), field: 'searchProvider', state: state.searchProvider, disabled, edit: props.edit, options: BACKEND_OPTIONS }),
             h(SecretField, { t, state, disabled, edit: props.edit }),
+            // Essential tuning stays visible; everything an ordinary deployment
+            // never touches lives behind one disclosure, so the card opens on
+            // the choices that actually decide behaviour.
+            isSearchApi
+              ? h('div', null,
+                h(SelectField, { t, label: t('field.searchType'), field: 'searchType', state: state.searchType, disabled, edit: props.edit, options: SEARCH_TYPE_OPTIONS }),
+                h(SelectField, { t, label: t('field.searchRecency'), field: 'searchRecency', state: state.searchRecency, disabled, edit: props.edit, options: SEARCH_RECENCY_OPTIONS }),
+                h(SelectField, { t, label: t('field.searchContextSize'), field: 'searchContextSize', state: state.searchContextSize, disabled, edit: props.edit, options: CONTEXT_SIZE_OPTIONS }),
+                h('div', { style: styles.note }, t('note.searchContextSize')),
+              )
+              : h('div', null,
+                h(SelectField, { t, label: t('field.preset'), field: 'preset', state: state.preset, disabled, edit: props.edit, options: PRESET_OPTIONS }),
+                state.preset.text !== ''
+                  ? h('div', { style: styles.note }, t('note.presetModel', { preset: state.preset.text }))
+                  : h(SelectField, { t, label: t('field.model'), field: 'model', state: modelState, disabled, edit: props.edit, groups: agentModelGroups(t) }),
+                h(SelectField, { t, label: t('field.searchRecency'), field: 'searchRecency', state: state.searchRecency, disabled, edit: props.edit, options: RECENCY_OPTIONS }),
+                h(SelectField, { t, label: t('field.imageInput'), field: 'imageInput', state: state.imageInput, disabled, edit: props.edit, options: IMAGE_INPUT_OPTIONS }),
+              ),
+            h(AdvancedSection, { t },
+              h('div', null,
+                h('div', { style: styles.note }, t('note.advanced')),
+                isSearchApi
+                  ? h('div', null,
+                    h(Field, { t, label: t('field.searchDomains'), field: 'searchDomains', state: state.searchDomains, disabled, edit: props.edit, placeholder: t('placeholder.commaList') }),
+                    h('div', { style: styles.note }, t('note.searchDomains')),
+                    h(Field, { t, label: t('field.searchLanguages'), field: 'searchLanguages', state: state.searchLanguages, disabled, edit: props.edit, placeholder: t('placeholder.commaList') }),
+                    h('div', { style: styles.note }, t('note.searchLanguages')),
+                    h(Field, { t, label: t('field.searchCountry'), field: 'searchCountry', state: state.searchCountry, disabled, edit: props.edit, placeholder: 'US' }),
+                    h('div', { style: styles.note }, t('note.searchCountry')),
+                    h(Field, { t, label: t('field.searchAfterDate'), field: 'searchAfterDate', state: state.searchAfterDate, disabled, edit: props.edit, placeholder: '3/1/2025' }),
+                    h(Field, { t, label: t('field.searchBeforeDate'), field: 'searchBeforeDate', state: state.searchBeforeDate, disabled, edit: props.edit, placeholder: '3/31/2025' }),
+                    h('div', { style: styles.note }, t('note.searchDate')),
+                    h(Field, { t, label: t('field.searchMaxTokensPerPage'), field: 'searchMaxTokensPerPage', state: state.searchMaxTokensPerPage, disabled, edit: props.edit, placeholder: t('placeholder.optional') }),
+                  )
+                  : h('div', null,
+                    h(Field, { t, label: t('field.maxTokens'), field: 'maxTokens', state: state.maxTokens, disabled, edit: props.edit, placeholder: t('placeholder.maxTokens') }),
+                    h(Field, { t, label: t('field.softTimeoutMs'), field: 'softTimeoutMs', state: state.softTimeoutMs, disabled, edit: props.edit, placeholder: t('placeholder.presetDefault') }),
+                    h('div', { style: styles.note }, t('note.softDeadline')),
+                    h(SelectField, { t, label: t('field.fallbackPreset'), field: 'fallbackPreset', state: state.fallbackPreset, disabled, edit: props.edit, options: FALLBACK_PRESET_OPTIONS }),
+                    state.imageInput.text !== 'off'
+                      ? h('div', null,
+                        h('div', { style: styles.note }, t('note.imageModelFollows')),
+                        h(Field, { t, label: t('field.imageMaxBytes'), field: 'imageMaxBytes', state: state.imageMaxBytes, disabled, edit: props.edit, placeholder: t('placeholder.imageMaxBytes') }),
+                        h(Field, { t, label: t('field.imageRoots'), field: 'imageRoots', state: state.imageRoots, disabled, edit: props.edit, placeholder: t('placeholder.imageRoots') }),
+                        h('div', { style: styles.note }, t('note.imageInput')),
+                        h('div', { style: styles.note }, t('note.imageRoots')),
+                      )
+                      : null,
+                  ),
+              ),
+            ),
             h('div', { style: styles.row },
               h('button', {
                 style: styles.buttonPrimary,

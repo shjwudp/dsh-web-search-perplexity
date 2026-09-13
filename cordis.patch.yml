@@ -4,13 +4,14 @@
 # apply() reads `process.env.PERPLEXITY_API_KEY` directly, so the secret never
 # lives as plaintext in a patch file and no `!!js` expression is needed.
 #
-# Override in the user's profile cordis.patch.yml if needed (restate all keys —
-# patch rows are replaced whole):
+# Every search goes to Perplexity's Agent API (`/v1/agent`); there is no API-mode
+# switch. Override in the user's profile cordis.patch.yml if needed (restate all
+# keys — patch rows are replaced whole):
 #
 #   - id: web-search-perplexity
 #     config:
 #       baseURL: https://api.perplexity.ai
-#       model: sonar
+#       model: openai/gpt-5.6-luna
 #       maxTokens: 1024
 
 - insert:
@@ -18,5 +19,4 @@
       name: '@shjwudp/dsh-web-search-perplexity'
       config:
         baseURL: https://api.perplexity.ai
-        model: sonar
         maxTokens: 1024

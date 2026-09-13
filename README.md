@@ -1,9 +1,17 @@
 # @shjwudp/dsh-web-search-perplexity
 
 Standalone Perplexity search provider for the DeepSeek Harness web seam
-(`ctx.web`). It registers a `WebSearchProvider` with id `perplexity` and maps
-Perplexity's OpenAI-compatible `POST /chat/completions` response into the
-seam's normalized `WebSearchResult`.
+(`ctx.web`). It registers a `WebSearchProvider` for Perplexity and ships two
+interchangeable backends:
+
+- **Agent API** (`POST /v1/agent`, default) — a model-generated, cited answer plus
+  its `search_results[]`, and image input.
+- **Search API** (`POST /search`) — ranked `results[]` with titles, URLs, snippets,
+  and dates, no generated answer, and the filters that endpoint publishes
+  (domains, languages, country, publication dates, recency, result count).
+
+Both map onto the seam's normalized `WebSearchResult`. Text questions and images
+go through the Agent API; the Search API is search-only by design.
 
 This package exists because the official
 `@deepseek-ai/dsh-web-search-perplexity` package imports
@@ -64,8 +72,70 @@ $env:PERPLEXITY_API_KEY = "pplx-..."
 export PERPLEXITY_API_KEY="pplx-..."
 ```
 
-Restart DSH. The provider registers itself as `perplexity`; the model-facing
-tools remain the standard `web_search` / `web_fetch` from `dsh-tool-web`.
+Restart DSH. The plugin registers both backends — `perplexity` (Agent API) and
+`perplexity-search` (Search API) — but only the selected one reports itself
+usable, so the seam never sees two candidates. The model-facing tools remain the
+standard `web_search` / `web_fetch` from `dsh-tool-web`.
+
+## Choosing a backend
+
+| | Agent API (default) | Search API |
+|---|---|---|
+| Endpoint | `POST /v1/agent` | `POST /search` |
+| Returns | generated answer + `search_results[]` | ranked `results[]` only |
+| `content` | the answer | a `[SEARCH]` marker line, no answer |
+| Result count | none on the wire; the seam truncates | native `max_results` (1–20 web, 1–50 people) |
+| Images | yes (`input_image`) | no |
+| Latency (measured) | ~4 s `fast` … ~25 s `medium` narrow | ~1–4 s |
+| Extra filters | recency (via the `web_search` tool) | domains, languages, country, publication dates, recency, `search_type: people` |
+
+Pick the Agent API when the model should get a synthesized, cited answer, or when
+it must read an image. Pick the Search API when you want raw ranked hits with
+control over result count and filtering, and intend to read the pages yourself.
+
+Set `searchProvider` to `perplexity-search` to switch; leave it blank (or set
+`perplexity`) to keep the Agent API. In a profile patch:
+
+```yaml
+- id: web-search-perplexity
+  config:
+    searchProvider: perplexity-search
+    searchDomains: [docs.perplexity.ai, arxiv.org]
+    searchContextSize: medium
+```
+
+The two backends are mutually exclusive by construction: while `perplexity-search`
+is selected the Agent provider reports itself unusable, because the seam refuses a
+call when more than one registered provider is usable.
+
+### The Search API backend
+
+- **No generated answer.** `content` carries one machine-readable marker line,
+  `[SEARCH] {"provider":"perplexity-search","sources":8}`, and the sources carry
+  the endpoint's snippets. `web_search` renders those snippets to the model, which
+  is expected to read and reconcile them rather than cite an answer.
+- **`max_results` is native.** The seam's `maxResults` is forwarded, bounded by
+  what the endpoint accepts for the configured `searchType` (20 for web, 50 for
+  people). The seam still truncates on the way back.
+- **`search_context_size` is web-only.** A people search that carries it is
+  rejected with `Invalid request`, so the backend omits it for `searchType:
+  people`.
+- **Invalid filters are dropped, not sent.** A malformed country code, language
+  code, or date is omitted rather than forwarded, because the endpoint answers a
+  bad filter with `422`. Dates must be `MM/DD/YYYY`; domains are capped at 20 and
+  language codes at 20 two-letter codes.
+- **Images are unsupported.** With this backend selected, an image query is sent
+  as ordinary search text; there is no `input_image` on this endpoint.
+
+A live smoke test for this backend:
+
+```powershell
+cd $env:USERPROFILE\.dsh\profiles\web
+$env:PERPLEXITY_API_KEY = "pplx-..."
+$env:PPLX_TYPE = "people"          # optional: web (default) or people
+$env:PPLX_RECENCY = "month"        # optional
+node C:\path\to\repo\scripts\live-search-api-check.mjs "your query"
+```
 
 ## Configuration
 
@@ -73,18 +143,31 @@ tools remain the standard `web_search` / `web_fetch` from `dsh-tool-web`.
 |---|---|---|
 | `apiKey` | unset | Literal Perplexity API key (secret role; normally configured in the UI instead) |
 | `apiKeyEnv` | `PERPLEXITY_API_KEY` | Credential reference used by the UI-stored key |
-| `apiMode` | `agent` | `agent` = Agent API (`/v1/agent`, default); `sonar` = Sonar Chat Completions (`/chat/completions`) |
-| `preset` | unset | Agent mode only: dynamic preset `fast`, `low`, `medium`, `high`, `xhigh`, or `wide-research`. When set, Perplexity picks the model; `model` is only sent as an override if it is a `provider/model` slug. |
-| `baseURL` | `https://api.perplexity.ai` | Endpoint base; the mode appends its own path |
-| `model` | `sonar` | `sonar` / `sonar-pro` / `sonar-reasoning-pro` / `sonar-deep-research` in Sonar mode; any Agent API model id (e.g. `openai/gpt-5.6-luna`) in Agent mode |
-| `maxTokens` | `1024` | `max_tokens` (Sonar mode) or `max_output_tokens` (Agent mode) for the generated answer |
-| `searchRecency` | unset | Sonar-mode only: `day`, `week`, `month`, or `year` |
-| `softTimeoutMs` | per preset (see below) | Agent mode only: soft deadline (ms) for one search before one degraded retry. Unset = derived from the configured `preset` (`fast`/`low` `12000`; `medium`/`high`/`xhigh`/`wide-research`/unset `40000`). `0` disables it. Keep `softTimeoutMs` + 15 s below the tool budget. |
-| `fallbackPreset` | `fast` | Agent mode only: preset used for the single degraded retry (any preset except `wide-research`) |
+| `preset` | unset | Dynamic preset `fast`, `low`, `medium`, `high`, `xhigh`, or `wide-research`. When set, Perplexity picks the model; `model` is only sent as an override if it is a `provider/model` slug. |
+| `baseURL` | `https://api.perplexity.ai` | Endpoint base; `/v1/agent` is appended |
+| `model` | `openai/gpt-5.6-luna` | Agent API model id (`provider/model`, e.g. `openai/gpt-5.6-sol`). Used when no preset is set; a value without `/` falls back to the default |
+| `maxTokens` | `1024` | `max_output_tokens` for the generated answer |
+| `searchRecency` | unset | Recency window for the search tool's filter: `day`, `week`, `month`, or `year`. Unset sends no filter |
+| `softTimeoutMs` | per preset, or 40 s for the Search API | One deadline for both backends. On the Agent API it bounds one search before one degraded retry; on the Search API it bounds the request. `0` disables it. Unset = derived from the configured `preset` (`fast`/`low` `12000`; `medium`/`high`/`xhigh`/`wide-research`/unset `40000`). `0` disables it. Keep `softTimeoutMs` + 15 s below the tool budget. |
+| `fallbackPreset` | `fast` | Preset used for the single degraded retry (any preset except `wide-research`) |
+| `imageInput` | enabled | Image input. Only the literal `off`/`false`/`0` disables it |
+| `imageMaxBytes` | `10485760` | Per-image byte ceiling for a local image; an oversized image is refused before it is read |
+| `imageRoots` | `[]` (no restriction) | Directory allowlist for local image reads; a path outside every entry is refused |
+| `searchProvider` | `''` (Agent API) | Which backend serves searches: blank or `perplexity` = Agent API; `perplexity-search` = Search API. Only the selected one is usable |
+| `searchType` | `web` | Search API only: `web` or `people`. `people` also raises the result bound to 50 |
+| `searchDomains` | `[]` | Search API only: up to 20 domains or URLs to restrict results to |
+| `searchLanguages` | `[]` | Search API only: up to 20 two-letter ISO 639-1 codes; sent lowercased |
+| `searchCountry` | unset | Search API only: two-letter ISO 3166-1 code, sent uppercased |
+| `searchContextSize` | `medium` | Search API only: `low`, `medium`, or `high` — how much page content each result returns. Omitted for `searchType: people`, which rejects it |
+| `searchMaxTokensPerPage` | unset | Search API only: explicit per-page content budget (`max_tokens_per_page`) |
+| `searchAfterDate` / `searchBeforeDate` | unset | Search API only: publication-date window as `MM/DD/YYYY` |
 
-> **Sonar deprecation note**: Perplexity's Sonar Chat Completions API is
-> deprecated and will be supported until **September 27, 2026**; the
-> replacement is the Agent API. Switch `apiMode` to `agent` before that date.
+> **Only the Agent API and the Search API are used.** Perplexity deprecated its
+> Sonar Chat Completions API (supported only until **2026-09-27**) in favor of the
+> Agent API, so this plugin has no `apiMode` switch. `searchRecency` works on both
+> backends: on the Agent API the window belongs to the `web_search` tool and is
+> sent as `tools[].filters.search_recency_filter` (`day`/`week`/`month`/`year`);
+> on the Search API it is a top-level field and additionally accepts `hour`.
 
 The provider resolves the API key in this order:
 
@@ -96,14 +179,96 @@ The provider resolves the API key in this order:
 The bundled patch layer deliberately does NOT list `apiKey`; the UI or the
 environment variable are the intended key sources.
 
+## Image input
+
+The provider can send an image to Perplexity for analysis, the same way the
+Perplexity clients accept an attachment. `dsh-tool-web` gives a provider only
+`request.query`, so an image reaches it as a query string:
+
+- a public `https://` image URL ending in `.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`,
+  passed to Perplexity as the image URL, or
+- an absolute path of a local image file, read and sent as a base64 data URI.
+
+A second query in the same call is the text question; with no other query the
+provider asks for an analysis of what the image shows.
+
+```js
+web_search({ queries: ['C:/Users/me/Pictures/board.png', 'identify this board and its documented pinout'] })
+```
+
+Reproduce the live path without a model in the loop — the key is resolved
+through the same credential chain the provider uses (environment, then the
+stored credential), and is never printed:
+
+```powershell
+$env:PERPLEXITY_API_KEY = "pplx-..."
+node scripts/live-image-check.mjs            # optional 2nd arg: a model id
+```
+
+The image travels as `input_image` parts beside the `input_text` question inside
+`/v1/agent`'s `input` array. Allowlisted formats and the 50 MB per-image cap are
+Perplexity's; `imageMaxBytes` is enforced before the file is read.
+
+Three rules keep this from becoming a file-exfiltration path:
+
+1. **Only images are read.** A file is sent only when its extension names an
+   image, its bytes really are that format (PNG/JPEG/GIF/WEBP signature check),
+   and it is within `imageMaxBytes`. A `.png` holding something else is refused
+   with an error rather than uploaded; a file with a non-image extension is left
+   alone and treated as ordinary search text.
+2. **`imageRoots` confines reads.** With entries configured, a path outside every
+   entry is refused before any read, so a research session cannot walk the disk
+   on its own.
+3. **A URL is never fetched locally.** An http(s) query is passed to Perplexity
+   as an image URL, never downloaded by this plugin.
+
+A URL image is only as good as its address: Perplexity fetches it server-side, so
+a URL its fetcher cannot retrieve (a stale thumbnail path, a host that rejects
+hotlinking, an expired signed link) fails the whole request with `invalid
+request`. A local file has no such dependency, because the bytes travel with the
+request.
+
+An image-bearing request keeps the configured preset (or `model`), exactly like a
+text request: there is no separate image model. Measured against the Agent API, a
+preset's own model reads images correctly — `preset: fast` answers an image
+question with `openai/gpt-5.6-luna` and the right answer — so one model selector
+cannot disagree with itself. The one thing to know is that with no preset set,
+the configured `model` must be able to read images; an image sent to a text-only
+model answers badly rather than failing loudly.
+
+The result's `content` starts with a machine-readable marker, because
+`dsh-tool-web`'s closed output schema forwards nothing else:
+
+```
+[IMAGE] {"images":1,"source":["C:/Users/me/Pictures/board.png"],"bytes":48211}
+```
+
+`source` echoes the URL when the image came from the web, and `bytes` is `0`
+for a URL image (nothing was uploaded by this plugin). Direct `ctx.web.search`
+callers also get the same object as `images` on the seam result.
+
+Images are slower and costlier than text: the upload precedes the analysis, and
+Perplexity bills image tokens as `(width × height) / 750` on top of the text
+tokens. An image request therefore gets the text deadline plus
+`IMAGE_ANALYSIS_MARGIN_MS` (12 s), capped where the degraded retry still fits the
+tool budget. That margin is internal on purpose: one deadline is configured, so
+no configuration can pair a text deadline with an image deadline that
+contradicts it.
+
 ## UI surfaces
 
 - **Plugin configuration card**: Settings → Plugins → Plugin configuration
   shows a collapsible, editable `Perplexity web search` card for the
-  `web-search-perplexity` settings namespace. It edits `baseURL`, `apiMode`,
-  `preset` (Agent mode), `model` (Sonar or Agent API model dropdowns),
-  `maxTokens`, `searchRecency` (Sonar mode only), the Agent-mode soft deadline
-  and its fallback preset, and the API key (write-only secret field).
+  `web-search-perplexity` settings namespace. It opens on the choices that decide
+  behaviour — `baseURL`, the backend selector (`searchProvider`), the API key,
+  and then the backend's own essentials (Agent API: `preset` or `model`,
+  `searchRecency`, `imageInput`; Search API: `searchType`, `searchRecency`,
+  `searchContextSize`). Everything else sits behind one `Advanced settings`
+  disclosure: `maxTokens`, the soft deadline and its fallback preset, and the
+  image settings (`imageMaxBytes`, `imageRoots`) for the Agent API;
+  `searchDomains`, `searchLanguages`, `searchCountry`, the publication-date
+  window, and `searchMaxTokensPerPage` for the Search API.
+  The API key is a write-only secret field either way.
 
 ## Timeouts and latency
 
@@ -122,8 +287,8 @@ ordinary desktop connection:
 
 A broad query on `medium` therefore outlives even a 60 s tool budget. Two guards:
 
-1. **Soft deadline (this plugin).** In Agent mode, `softTimeoutMs` bounds one
-   request. When it expires the provider makes exactly one bounded retry on
+1. **Soft deadline (this plugin).** `softTimeoutMs` bounds one request. When it
+   expires the provider makes exactly one bounded retry on
    `fallbackPreset` (default `fast`) and returns that answer marked as degraded
    (see *Degradation is machine-readable* below). Worst case is about
    `softTimeoutMs` + 15 s, and that sum must stay below the tool budget. Set
@@ -248,8 +413,8 @@ The settings card follows the harness language setting. Its copy lives in the
 `DICTS` object in `src/client.js` and is registered through
 `ctx.locale.register('web-search-perplexity', { zh, en })`, which requires both
 shipped locales to carry the same key set. Option values that are identifiers
-(`sonar-pro`, preset names, model ids) are deliberately not translated. This
-README and the embedded skill are English-only.
+(preset names, `day`/`month`, Agent API model ids) are deliberately not
+translated. This README and the embedded skill are English-only.
 
 The embedded `perplexity-research` skill is authored as plain markdown at
 `skills/perplexity-research/SKILL.md`. `src/skill.js` is generated

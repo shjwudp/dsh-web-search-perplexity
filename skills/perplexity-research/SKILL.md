@@ -45,6 +45,69 @@ or edit content already provided in the conversation or repository.
 8. Distinguish source-backed facts, engineering inference, and unresolved
    uncertainty in the final response.
 
+## Researching an image
+
+The Perplexity provider accepts an image as a query. Pass either
+
+- a public `https://` image URL whose path ends in `.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`, or
+- the absolute path of a local image file,
+
+as the item in `web_search`'s `queries` array, and the plugin sends it to
+Perplexity as the image to analyze. A second query in the same call is used as
+the text question; with no other query, the plugin asks for an analysis of what
+the image shows.
+
+```
+web_search({ queries: ["C:/Users/me/Pictures/board.png", "identify this board and its documented pinout"] })
+```
+
+Rules that matter:
+
+1. The question decides the answer's usefulness. Name the entities and the
+   decision, not just "what is this".
+2. Only images are read. A path whose bytes are not PNG/JPEG/GIF/WEBP is
+   refused with an error, and a path outside the deployment's configured
+   `imageRoots` is refused before any read. Do not try to work around a refusal
+   by renaming a file.
+3. An image request is slower than a text search: it uploads the image and then
+   reads it. It ignores the Agent preset and uses the configured image model,
+   because a preset is tuned for speed rather than chosen for vision. Prefer one
+   image with one narrow question over several images per call.
+4. A URL image is fetched by Perplexity, not by the harness. When its fetcher
+   cannot retrieve the URL — a stale thumbnail path, a host that blocks
+   hotlinking, an expired signed link — the whole request fails with
+   `invalid request` and no local retry can fix it. Prefer a local file path when
+   the image is already on disk.
+5. The first line of the answer is a machine-readable image marker:
+
+   ```
+   [IMAGE] {"images":1,"source":["C:/Users/me/Pictures/board.png"],"bytes":48211}
+   ```
+
+   Check it before trusting the answer: it confirms which image the provider
+   analyzed. `source` echoes the URL when the image came from the web.
+6. Never send an image that contains secrets, private screenshots, customer
+   data, or unreleased material to the external API. A screenshot of a private
+   repository or an internal dashboard stays local.
+
+## Which backend answered
+
+The provider has two backends, and the deployment picks one. The first line of
+the answer tells you which you got:
+
+- **Agent API** (no prefix): a synthesized, cited answer. Use it as an answer.
+- **Search API** (`[SEARCH] {...}` as the first line): ranked search hits with
+  titles, URLs, and extracted snippets — and **no synthesized answer**. Treat the
+  hits as sources to read and reconcile yourself, not as a conclusion, and fetch
+  the pages that matter with `web_fetch` before relying on a claim. The marker
+  reports how many hits came back and, for a people search,
+  `"searchType":"people"`.
+
+The Search API backend also enforces whatever domain, language, country, date,
+and recency filters the deployment configured, so a surprisingly narrow result
+set can be configuration rather than scarcity. It does not accept images: with
+that backend selected, an image query is not an image search.
+
 ## Tool budget, presets, and timeouts
 
 `web_search` runs under a harness deadline (`dsh-tool-web`'s
