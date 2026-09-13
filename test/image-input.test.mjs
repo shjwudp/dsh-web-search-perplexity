@@ -87,6 +87,8 @@ function makeProvider(config) {
     get() { return undefined },
     inject() {},
     web: { registerSearchProvider(p) { provider = p } },
+    tools: { register() {} },
+    systemPrompt: { section() {}, getSectionOrder: () => 0 },
   }
   apply(ctx, config)
   if (provider === undefined) throw new Error('provider was not registered')

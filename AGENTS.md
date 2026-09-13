@@ -13,6 +13,29 @@ This repository is a standalone DeepSeek Harness plugin
 they are not part of the installed plugin runtime and are not published in the
 npm package.
 
+## Two copies of the skill, two load times
+
+- **Host code (`src/*.js`) loads once, at process start.** Any change needs a DSH
+  restart before the running host uses it. `npm run sync:profile` publishes the
+  working tree into the installed profile copy.
+- **The skill body is read when it is loaded**, and this deployment also serves
+  `~/.dsh/skills/perplexity-research/SKILL.md` through
+  `@deepseek-ai/dsh-skill-filesystem` (watcher on by default). Editing
+  `skills/…/SKILL.md` and running `npm run build:skill` updates only the plugin's
+  embedded copy, so publish the markdown to the filesystem root as well:
+
+  ```powershell
+  npm run build:skill
+  Copy-Item skills\perplexity-research\SKILL.md $env:USERPROFILE\.dsh\skills\perplexity-research\SKILL.md -Force
+  ```
+
+  Skipping that step leaves sessions loading instructions that no longer match the
+  plugin — the two copies then drift silently, because duplicates across skill
+  layers resolve without warning.
+- **Never document a shell-side API call in the skill.** An agent shell runs with
+  secrets scrubbed, so `$PERPLEXITY_API_KEY` is absent there and any `curl`/CLI
+  path fails with 401. Only the tools resolve the key, inside the host.
+
 ## Commands
 
 - `npm run check` — syntax-check the host and client sources

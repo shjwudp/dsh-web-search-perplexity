@@ -86,6 +86,8 @@ function makeProviders(config, options = {}) {
     },
     inject() {},
     web: { registerSearchProvider(provider) { providers.set(provider.id, provider) } },
+    tools: { register() {} },
+    systemPrompt: { section() {}, getSectionOrder: () => 0 },
   }
   apply(ctx, config)
   return providers

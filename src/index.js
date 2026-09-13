@@ -53,10 +53,27 @@ import z from '@deepseek-ai/schemastery'
 import { WebError } from '@deepseek-ai/dsh-web'
 import { PERPLEXITY_RESEARCH_SKILL } from './skill.js'
 import { PerplexitySearchApiProvider, SEARCH_API_PROVIDER_ID } from './search-api.js'
+import { DEFAULT_RESEARCH_TIMEOUT_MS, applyResearchTool, researchTimeoutMs } from './research.js'
 import { canParseURL, isAbortError, requestJson as postJson, resolveApiKey } from './shared.js'
 
 export const name = 'web-search-perplexity'
-export const inject = ['web']
+// All three are required rather than probed: the plugin contributes the
+// `perplexity_research` tool, whose model-facing guidance is a prompt section.
+// A composition without either registry could not honour that contribution, so
+// the plugin says so instead of failing later on an undefined service.
+// `web` is the seam both search providers register into.
+export const inject = ['web', 'tools', 'systemPrompt']
+
+export {
+  DEFAULT_RESEARCH_TIMEOUT_MS,
+  RESEARCH_DEFAULT_DEPTH,
+  RESEARCH_DEPTHS,
+  RESEARCH_TOOL_NAME,
+  formatResearchOutput,
+  parseResearchArgs,
+  presentResearchCall,
+  researchTimeoutMs,
+} from './research.js'
 
 // The Search API backend lives in its own module; re-export its surface so this
 // package has one entry point, and so both backends can be imported together.
@@ -263,6 +280,10 @@ const Config = z.object({
   searchMaxTokensPerPage: z.number().step(1).min(1),
   searchAfterDate: z.string().default(''),
   searchBeforeDate: z.string().default(''),
+  // The `perplexity_research` tool's own budget, independent of `tool-web`'s.
+  // This is the tool's reason to exist, not a second deadline for search: a
+  // quick search is bounded by `softTimeoutMs`, a research call by this.
+  researchTimeoutMs: z.number().step(1).min(0).default(DEFAULT_RESEARCH_TIMEOUT_MS),
 })
 
 /** Map one structured Perplexity search result into a normalized source. */
@@ -737,6 +758,18 @@ function requestJson(url, apiKey, body, signal, retries = 2) {
 export function apply(ctx, config = {}) {
   let current = () => config
 
+  // The registrations below are the plugin's whole contribution, so a service
+  // that cannot receive one is a misconfiguration to name, not to skip.
+  for (const service of ['web', 'tools', 'systemPrompt']) {
+    if (ctx.get(service) === undefined && ctx[service] === undefined) {
+      throw new Error(
+        `web-search-perplexity needs the "${service}" service: it registers two search `
+        + 'providers and the perplexity_research tool. Mount it in a composition that '
+        + 'loads @deepseek-ai/dsh-web and @deepseek-ai/dsh-tools.',
+      )
+    }
+  }
+
   ctx.inject(['settings'], (settingsCtx) => {
     settingsCtx.settings.installSection(ctx, SETTINGS_NAMESPACE, Config, config, {
       setSource: (source) => {
@@ -752,6 +785,19 @@ export function apply(ctx, config = {}) {
   if (skills !== undefined && typeof skills.register === 'function') {
     skills.register(PERPLEXITY_RESEARCH_SKILL)
   }
+
+  // The long-research tool carries its own budget, which is what lets it outlive
+  // `tool-web`'s per-session budget that a plugin cannot raise.
+  applyResearchTool(ctx, current, {
+    agentRequestBody,
+    agentImageRequestBody,
+    buildImageRequest,
+    degradationStatus,
+    mapAgentResponse,
+    requestJson,
+    resolveApiKey,
+    resolveOptions,
+  })
 
   // Both backends are registered, but only one reports itself usable at a time:
   // each `available()` consults `searchProvider`, so switching in the settings UI

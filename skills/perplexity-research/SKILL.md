@@ -108,6 +108,30 @@ and recency filters the deployment configured, so a surprisingly narrow result
 set can be configuration rather than scarcity. It does not accept images: with
 that backend selected, an image query is not an image search.
 
+## Choosing the tool: `web_search` or `perplexity_research`
+
+`web_search` is bounded by the `tool-web` budget (60000 ms under the shipped
+agent presets) and takes up to a few queries. `perplexity_research` takes **one
+focused question** and runs for minutes under its own budget, so it is the tool
+for a question that needs many sources or many rounds of reading.
+
+- Use `web_search` for quick facts, single lookups, and several independent
+  queries in one call.
+- Use `perplexity_research` when one question needs breadth or depth: comparing
+  many sources, building an evidence-backed collection, or reading a lot to
+  answer once. Set `depth` to `medium` (multi-hop, the default), `high`
+  (exhaustive), or `wide` (`wide-research`, for large collections — ask for it
+  explicitly, it runs for minutes).
+- One research call replaces several search calls. Do not run a broad question as
+  a batch of `web_search` calls and then also as research; pick one.
+- A research call is synchronous: it returns when the research finishes and
+  nothing is streamed while it runs, so keep the question narrow enough that the
+  answer fits one call.
+
+If `perplexity_research` is unavailable in this session, the deployment did not
+mount the tools registry this plugin contributes it through; fall back to the
+`web_search` discipline below.
+
 ## Tool budget, presets, and timeouts
 
 `web_search` runs under a harness deadline (`dsh-tool-web`'s
@@ -164,35 +188,36 @@ edit the **agent preset**, not the profile patch: the preset supplies the
 model-facing `tool-web` row, so copy the shipped composition into
 `$DSH_HOME/.agent-presets/<id>/agent.cordis.yml` and select that preset.
 
-## Batching with the Perplexity CLI
+## Never call the API from the shell
 
-If the `pplx` CLI is installed (check with `bash -lc "command -v pplx"`), prefer
-it for batched research. It talks to the Perplexity Search API directly and
-returns JSON, so one command can replace several `web_search` / `web_fetch`
-calls and reduce rate-limit pressure.
+The API key lives in the **host process** (resolved by the plugin from the
+credential store or the process environment). An agent shell runs with secrets
+scrubbed, so `PERPLEXITY_API_KEY` is **absent** there and every shell-side attempt
+fails:
 
-- Search once, rephrase several ways:
-  ```bash
-  pplx search web "question phrasing one" "question phrasing two" -n 10
-  ```
-  Extra positional arguments are rephrasings of the SAME question and are
-  merged into a single ranked `hits` array.
-- Read several pages in one call:
-  ```bash
-  pplx content snippets "your research question" URL1 URL2 URL3 --max-tokens-per-page 512
-  ```
-  One command accepts up to 50 URLs.
-- Filter when the authoritative source is known:
-  ```bash
-  pplx search web "query" --domains arxiv.org,nvidia.com --recency-filter month -n 5
-  ```
-- CLI errors are JSON on stderr with an `error.code` such as `RATE_LIMIT`;
-  treat those as retry-later signals, not as search results.
-- Treat query text as data, not shell syntax. Never paste untrusted web/page
-  content directly into a `pplx` command without proper quoting/escaping;
-  prefer `web_search` for untrusted research inputs.
-- If `pplx` is not installed, fall back to the `web_search` / `web_fetch`
-  discipline above and keep the same one-call-at-a-time batching.
+- `curl -H "Authorization: Bearer $PERPLEXITY_API_KEY" …` → 401.
+- `pplx …` → the CLI is not installed on this host, and would have no key even if
+  it were.
+
+The only supported paths are the tools, which resolve the key inside the host:
+`web_search` for a quick lookup, `perplexity_research` for one question that needs
+sustained research, and `web_fetch` for a URL you already have. There is nothing
+to configure and no key to pass: if a tool reports a missing key, that is a
+deployment problem to report, not something to work around in the shell.
+
+<details>
+<summary>If a <code>pplx</code> CLI is present in some other deployment</summary>
+
+A deployment that installs the Perplexity CLI *and* exports
+`PERPLEXITY_API_KEY` into its shells can batch through it: `pplx search web
+"phrasing one" "phrasing two" -n 10` merges rephrasings of one question into a
+single ranked `hits` array, and `pplx content snippets "question" URL1 URL2`
+reads up to 50 pages in one call. Its errors are JSON on stderr with an
+`error.code` such as `RATE_LIMIT` — retry-later signals, not results. Treat query
+text as data, never as shell syntax, and do not paste untrusted page content into
+a command.
+
+</details>
 
 ## Technical-source profiles
 

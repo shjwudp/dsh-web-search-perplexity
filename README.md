@@ -1,8 +1,8 @@
 # @shjwudp/dsh-web-search-perplexity
 
 Standalone Perplexity search provider for the DeepSeek Harness web seam
-(`ctx.web`). It registers a `WebSearchProvider` for Perplexity and ships two
-interchangeable backends:
+(`ctx.web`). It registers search providers for Perplexity, contributes one
+long-research tool, and ships two interchangeable backends:
 
 - **Agent API** (`POST /v1/agent`, default) — a model-generated, cited answer plus
   its `search_results[]`, and image input.
@@ -24,7 +24,8 @@ dependencies.
 - Tested with **DSH 0.1.5-rc.2** (`@deepseek-ai/dsh-web` 0.1.5-rc.2,
   `@deepseek-ai/schemastery` 3.18.2). The host version numbers below are DSH's,
   not this plugin's; this package's own versions are the `v*` tags.
-- Peer dependencies: `@deepseek-ai/dsh-web: ^0.1.2-rc.1`,
+- Peer dependencies: `@deepseek-ai/dsh-tools: ^0.1.2-rc.1`,
+  `@deepseek-ai/dsh-web: ^0.1.2-rc.1`,
   `@deepseek-ai/schemastery: ^3.18.1-rc.1`. The declared range is unchanged and
   its lower bound is where this plugin was first written, so an older 0.1.2-rc.x
   host satisfies it too.
@@ -32,6 +33,10 @@ dependencies.
   tools `web_search` / `web_fetch` enabled (`dsh-tool-web`). In the `web`
   profile, `dsh-tool-web` is disabled by the web-app layer by default; enable
   it with `- id: tool-web, disabled: false` in the profile patch.
+- Injects `web`, `tools`, and `systemPrompt`. The latter two are required since
+  the plugin also contributes the `perplexity_research` tool; a composition
+  without either registry fails at load with a message naming the missing
+  service rather than registering nothing.
 - Node ≥ 18
 - The settings card's translations are registered through the client locale
   service (`ctx.locale.register`, `@deepseek-ai/dsh-client-locale`). On a host
@@ -153,6 +158,7 @@ node C:\path\to\repo\scripts\live-search-api-check.mjs "your query"
 | `imageInput` | enabled | Image input. Only the literal `off`/`false`/`0` disables it |
 | `imageMaxBytes` | `10485760` | Per-image byte ceiling for a local image; an oversized image is refused before it is read |
 | `imageRoots` | `[]` (no restriction) | Directory allowlist for local image reads; a path outside every entry is refused |
+| `researchTimeoutMs` | `600000` | Budget for one `perplexity_research` call, independent of `tool-web`'s search budget. `0` declares no deadline. Read once when the tool registers, so a change takes effect on the next DSH start |
 | `searchProvider` | `''` (Agent API) | Which backend serves searches: blank or `perplexity` = Agent API; `perplexity-search` = Search API. Only the selected one is usable |
 | `searchType` | `web` | Search API only: `web` or `people`. `people` also raises the result bound to 50 |
 | `searchDomains` | `[]` | Search API only: up to 20 domains or URLs to restrict results to |
@@ -254,6 +260,40 @@ tokens. An image request therefore gets the text deadline plus
 tool budget. That margin is internal on purpose: one deadline is configured, so
 no configuration can pair a text deadline with an image deadline that
 contradicts it.
+
+## Long research: the `perplexity_research` tool
+
+`web_search` cannot run a minutes-long research question: its budget is
+`tool-web.searchTimeoutMs` (60 s under the shipped agent presets), and that row
+lives in each session's agent preset, which a plugin cannot reach. A tool
+declares its own `timeoutMs` — enforced by
+`@deepseek-ai/dsh-tool-call-timeout-policy` — so this plugin contributes a second
+tool that carries its own budget and never runs through `tool-web`'s.
+
+| | `web_search` | `perplexity_research` |
+|---|---|---|
+| Budget | `tool-web.searchTimeoutMs` (60 s shipped) | `researchTimeoutMs` (default 600000, i.e. 10 minutes) |
+| Input | 1–4 queries | one focused question, plus a depth |
+| Preset | the configured one | chosen by `depth` |
+| Backend | Agent or Search API | Agent API only |
+| Use it for | quick facts, several lookups | one question needing many sources or many rounds |
+
+`depth` selects the Agent preset: `medium` (multi-hop browsing, the default),
+`high` (exhaustive coverage), or `wide` (`wide-research`). The default is
+`medium` on purpose: it is the deepest preset whose measured latency (~25 s
+narrow) still fits a synchronous call, whereas `wide-research` is a minutes-long
+collection workflow and has to be asked for. Ask for `wide` when the answer needs
+a large evidence-backed collection.
+
+The tool is registered through `ctx.tools`, so it is available in every session
+of a profile that mounts this plugin — including sessions composed from an agent
+preset, because the preset's `tool-web` row and this tool's budget are separate
+things. `researchTimeoutMs` is read once, when the tool registers, so changing it
+takes effect on the next DSH start. `0` declares no deadline at all.
+
+A long call is still a *synchronous* call: nothing is streamed while it runs. If
+you need unattended research that outlives a turn, that is the Agent API's
+`background` mode and would be a different tool shape (submit, then collect).
 
 ## UI surfaces
 
@@ -420,3 +460,29 @@ The embedded `perplexity-research` skill is authored as plain markdown at
 `skills/perplexity-research/SKILL.md`. `src/skill.js` is generated
 from that file; edit the markdown, then run `npm run build:skill` (also run
 automatically before packing/publishing via `prepack`).
+
+#### A deployment can serve the skill from two places
+
+The plugin registers its embedded copy through `ctx.skills`, and a deployment
+that also mounts `@deepseek-ai/dsh-skill-filesystem` serves whatever sits under
+`$DSH_HOME/skills/`. Those are two independent copies of the same skill name, and
+an edit lands in only one of them:
+
+| Edited | Takes effect in |
+|---|---|
+| `skills/…/SKILL.md` + `npm run build:skill` | the plugin's embedded copy, after the host restarts |
+| `$DSH_HOME/skills/perplexity-research/SKILL.md` | that filesystem copy, immediately (its watcher is on by default) |
+
+A deployment that publishes the skill to `$DSH_HOME/skills/` therefore keeps
+serving the published file however many times the repository copy is rebuilt, and
+the two drift silently: a session can load instructions that no longer match the
+plugin. After changing the markdown, publish it to both places:
+
+```powershell
+npm run build:skill
+Copy-Item skills\perplexity-research\SKILL.md $env:USERPROFILE\.dsh\skills\perplexity-research\SKILL.md -Force
+```
+
+Skill bodies are read at load time and the filesystem provider watches its roots,
+so a skill change needs no DSH restart either way — unlike the host half, which
+only loads at process start.
