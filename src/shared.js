@@ -116,6 +116,87 @@ export function sleep(ms, signal) {
   })
 }
 
+/** Proxy env names, in the spellings Node and undici consult. */
+const PROXY_ENV_NAMES = [
+  'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy',
+]
+
+/**
+ * Render the userinfo of a proxy URL as `***`, so a credentialed proxy URL can
+ * be reported without disclosing the credential.
+ *
+ * @param value - the raw environment value.
+ * @returns the value with any `user:pass@` replaced by `***@`.
+ */
+export function redactProxyValue(value) {
+  try {
+    const url = new URL(value.includes('://') ? value : `http://${value}`)
+    if (url.username === '' && url.password === '') return value
+    url.username = '***'
+    url.password = ''
+    return url.toString()
+  } catch {
+    // Not a URL: report the shape without risking a credential.
+    return value.includes('@') ? '***@(unparseable)' : value
+  }
+}
+
+/**
+ * Describe the runtime configuration a connection failure depends on.
+ *
+ * A `fetch` failure that happens in one process and not another on the same
+ * machine is decided by something outside the request: the runtime version, and
+ * the proxy variables that process actually sees. Node's `fetch` ignores the
+ * proxy environment — a harness installs a dispatcher when it wants them honored
+ * — but a long-lived host can have those names written at runtime, which no
+ * external observer can see. Reporting them here makes the next failure carry
+ * its own answer.
+ *
+ * @returns one line naming the runtime and every set proxy variable, redacted.
+ */
+export function describeRuntime() {
+  const proxy = PROXY_ENV_NAMES
+    .filter((name) => process.env[name] !== undefined && process.env[name] !== '')
+    .map((name) => `${name}=${redactProxyValue(String(process.env[name]))}`)
+  return `runtime=node/${process.version} ${proxy.length > 0 ? proxy.join(' ') : 'proxy=(none set)'}`
+}
+
+/**
+ * Render a thrown value's full cause chain as machine-readable text.
+ *
+ * `fetch` reports every connection-layer failure as the same
+ * `TypeError: fetch failed`, and puts the actionable part — `ENOTFOUND`,
+ * `ECONNREFUSED`, `ETIMEDOUT`, a TLS error, a proxy refusal — in `cause` (for
+ * an aggregate failure, in `cause.errors[]`). `String(error)` shows none of it,
+ * so a provider failure reached the caller as an undiagnosable "fetch failed".
+ * This walks the chain and appends each level's `name`, `message`, and any
+ * `code`/`errno`/`syscall`/`address`/`port`/`hostname`.
+ *
+ * @param error - the thrown value, of any type.
+ * @param depth - current depth, to bound the walk.
+ * @returns one line naming the error and its causes, innermost last.
+ */
+export function describeErrorCause(error, depth = 0) {
+  if (depth > 4) return '(cause chain truncated)'
+  if (error === undefined || error === null) return '(no value)'
+  if (!(error instanceof Error)) return String(error)
+  const details = []
+  for (const field of ['code', 'errno', 'syscall', 'address', 'port', 'hostname']) {
+    const value = error[field]
+    if (value !== undefined) details.push(`${field}=${String(value)}`)
+  }
+  const head = `${error.name}: ${error.message}${details.length > 0 ? ` (${details.join(', ')})` : ''}`
+  const causes = []
+  if (Array.isArray(error.errors) && error.errors.length > 0) {
+    // An aggregate fetch failure wraps one error per attempted address.
+    for (const inner of error.errors) causes.push(describeErrorCause(inner, depth + 1))
+  }
+  if (error.cause !== undefined && error.cause !== error) {
+    causes.push(describeErrorCause(error.cause, depth + 1))
+  }
+  return causes.length > 0 ? `${head} <- ${causes.join(' | ')}` : head
+}
+
 /**
  * POST one JSON request and return the parsed response body.
  *
@@ -154,7 +235,14 @@ export async function requestJson(url, apiKey, body, signal, webError, messagePr
       if (isAbortError(error)) {
         throw new webError(`${messagePrefix} aborted`, 'WEB_ABORTED', { cause: error })
       }
-      throw new webError(`${messagePrefix} request failed: ${String(error)}`, 'WEB_PROVIDER_ERROR', { cause: error })
+      // The endpoint is named because a wrong baseURL is one of the things this
+      // message has to distinguish; the runtime line names what the process
+      // itself sees, which is the part an outside observer cannot inspect.
+      throw new webError(
+        `${messagePrefix} request failed: ${describeErrorCause(error)} [POST ${url}] (${describeRuntime()})`,
+        'WEB_PROVIDER_ERROR',
+        { cause: error },
+      )
     }
 
     if (response.ok) {
