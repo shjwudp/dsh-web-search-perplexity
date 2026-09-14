@@ -26,7 +26,7 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { WebError } from '@deepseek-ai/dsh-web'
-import { requestJson, sleep } from './shared.js'
+import { runAgentRequest } from './agent-run.js'
 
 /**
  * Prefix that keeps provider-controlled text visibly outside agent
@@ -91,20 +91,6 @@ export const RESEARCH_DEFAULT_DEPTH = 'medium'
  * configurable `researchTimeoutMs` raises or lowers it.
  */
 export const DEFAULT_RESEARCH_TIMEOUT_MS = 1_800_000
-
-/** Wait before the first poll: a short run often finishes almost immediately. */
-export const AGENT_POLL_INITIAL_MS = 1_000
-
-/** Steady-state poll interval; also the ceiling the backoff ramps up to. */
-export const AGENT_POLL_INTERVAL_MS = 3_000
-
-/**
- * Statuses that mean the run will not change again.
- *
- * The Agent API documents exactly these four; `queued` and `in_progress` are
- * the only non-terminal ones.
- */
-export const AGENT_TERMINAL_STATUSES = Object.freeze(['completed', 'failed', 'cancelled', 'incomplete'])
 
 /**
  * One source, narrowed to the fields this tool renders.
@@ -178,137 +164,6 @@ export function parseResearchArgs(args) {
   const question = typeof args?.question === 'string' ? args.question.trim() : ''
   if (question.length === 0) throw new Error('question must be a non-empty string')
   return { question, preset: chosen.preset }
-}
-
-/**
- * Ask the Agent API to cancel a background response, and never fail over it.
- *
- * Cancellation is a courtesy to the account being billed for a run nobody is
- * waiting for any more, so a failure here must not replace the error the caller
- * actually needs to see. The endpoint is documented as asynchronous: a `200`
- * acknowledges with `status: "cancelling"` and the run stops shortly after.
- *
- * @param options - resolved provider options, for the base URL.
- * @param apiKey - bearer credential.
- * @param id - the response id to cancel.
- * @param requestJson - the shared JSON transport.
- * @returns nothing; failures are swallowed deliberately.
- */
-async function cancelAgentResponse(options, apiKey, id, requestJson) {
-  try {
-    await requestJson(
-      `${options.baseURL}/v1/agent/${encodeURIComponent(id)}/cancel`,
-      apiKey,
-      undefined,
-      undefined,
-      WebError,
-      'Perplexity research',
-      0,
-      'POST',
-    )
-  } catch {
-    // Intentionally empty: the run may still be found later by id, and the
-    // caller is already receiving the reason this call ended early.
-  }
-}
-
-/**
- * Wait for a background Agent response to reach a terminal status.
- *
- * A research run takes minutes, and holding one connection open for minutes is
- * what made long calls fail: the peer closes it and the caller sees
- * `fetch failed <- SocketError: other side closed`. The Agent API's documented
- * answer is background mode — submit, then poll — so the connection is short
- * and the run's lifetime is decoupled from it. Nothing here holds state across
- * calls: this is one bounded loop inside one tool call, and the run lives on
- * Perplexity's side, not in this process. (An in-memory pending table is
- * exactly what took this plugin down before; there is none.)
- *
- * A poll that fails transiently does not abandon the run — the run is still
- * going, and the id still identifies it — so the loop keeps polling until the
- * deadline and only then reports the last error. The deadline is enforced here
- * as well as by the tool budget because a caller may declare no budget at all.
- *
- * @param id - response id returned by the background submit.
- * @param options - resolved provider options, for the base URL.
- * @param apiKey - bearer credential.
- * @param requestJson - the shared JSON transport.
- * @param signal - optional caller cancellation.
- * @param timeoutMs - how long to wait before giving up; `0` means no deadline.
- * @returns the terminal response object.
- * @throws {WebError} when the run fails, is cancelled, or the wait expires.
- */
-export async function waitForAgentResponse(id, options, apiKey, requestJson, signal, timeoutMs) {
-  const deadline = timeoutMs > 0 ? Date.now() + timeoutMs : Number.POSITIVE_INFINITY
-  const url = `${options.baseURL}/v1/agent/${encodeURIComponent(id)}`
-  let waitMs = AGENT_POLL_INITIAL_MS
-  let lastError
-
-  for (;;) {
-    if (signal?.aborted) {
-      await cancelAgentResponse(options, apiKey, id, requestJson)
-      throw new WebError('Perplexity research aborted', 'WEB_ABORTED')
-    }
-    if (Date.now() >= deadline) break
-
-    try {
-      await sleep(waitMs, signal)
-    } catch (error) {
-      // A cancellation that lands during a wait is the same caller
-      // cancellation as one that lands during a request.
-      if (error?.name === 'AbortError') {
-        await cancelAgentResponse(options, apiKey, id, requestJson)
-        throw new WebError('Perplexity research aborted', 'WEB_ABORTED', { cause: error })
-      }
-      throw error
-    }
-
-    let snapshot
-    try {
-      snapshot = await requestJson(url, apiKey, undefined, signal, WebError, 'Perplexity research', 0, 'GET')
-    } catch (error) {
-      // Cancellation is final; everything else may be a blip. The run is
-      // unaffected by a failed poll, so remember the error and keep waiting.
-      if (error?.code === 'WEB_ABORTED') {
-        await cancelAgentResponse(options, apiKey, id, requestJson)
-        throw error
-      }
-      lastError = error
-      waitMs = Math.min(waitMs * 2, AGENT_POLL_INTERVAL_MS)
-      continue
-    }
-
-    if (snapshot !== null && typeof snapshot === 'object' && AGENT_TERMINAL_STATUSES.includes(snapshot.status)) {
-      if (snapshot.status === 'completed' || snapshot.status === 'incomplete') return snapshot
-      if (snapshot.status === 'cancelled') {
-        throw new WebError(
-          `Perplexity cancelled the research run (response ${id}). It may have been stopped by the `
-          + 'account or the service; retry the question, or narrow it.',
-          'WEB_PROVIDER_ERROR',
-        )
-      }
-      const detail = snapshot.error?.message ?? snapshot.error?.code
-      throw new WebError(
-        `Perplexity research failed (response ${id})`
-        + `${detail !== undefined ? `: ${String(detail)}` : ` with status ${String(snapshot.status)}`}`,
-        'WEB_PROVIDER_ERROR',
-      )
-    }
-
-    // Still `queued` or `in_progress`.
-    waitMs = Math.min(waitMs * 2, AGENT_POLL_INTERVAL_MS)
-  }
-
-  // The run is still going. Cancel it so it stops costing money, but keep the
-  // id in the message: the result is retrievable by hand if it finished first.
-  await cancelAgentResponse(options, apiKey, id, requestJson)
-  const budget = Math.round(timeoutMs / 1000)
-  throw new WebError(
-    `Perplexity research did not finish within ${budget}s, so it was cancelled. `
-    + `The run's id is ${id}: it can still be retrieved with GET ${options.baseURL}/v1/agent/${id}.`
-    + `${lastError !== undefined ? ` Last polling error: ${String(lastError.message ?? lastError)}` : ''}`,
-    'WEB_PROVIDER_ERROR',
-  )
 }
 
 /**
@@ -430,25 +285,13 @@ function researchToolOptions(ctx, config, deps) {
       // focused question, and the same guards apply.
       const imageRequest = await buildImageRequest([question], options)
       const request = { query: question }
-      const body = {
-        ...(imageRequest !== undefined
-          ? agentImageRequestBody(imageRequest.body, options, preset)
-          : agentRequestBody(request, options, preset)),
-        // Submit asynchronously and poll, which is the Agent API's documented
-        // pattern for runs that take minutes. One long-lived connection is what
-        // the network drops on a `high` run; many short polls are not.
-        background: true,
-      }
-      const submitted = await requestJson(
-        `${options.baseURL}/v1/agent`, apiKey, body, exec.signal, WebError, 'Perplexity research', 0, 'POST')
-      // A submit is documented to answer `queued` immediately. If a deployment
-      // ever answers with the finished response directly, use it rather than
-      // polling an id that is already terminal.
-      const data = submitted !== null && typeof submitted === 'object'
-        && AGENT_TERMINAL_STATUSES.includes(submitted.status)
-        ? submitted
-        : await waitForAgentResponse(
-          submitted?.id, options, apiKey, requestJson, exec.signal, budget)
+      const body = imageRequest !== undefined
+        ? agentImageRequestBody(imageRequest.body, options, preset)
+        : agentRequestBody(request, options, preset)
+      // Submit in the background and poll, which is the Agent API's documented
+      // pattern for runs that take minutes. Shared with `web_search`, so the two
+      // cannot drift in how they submit, cancel, or report.
+      const data = await runAgentRequest(body, options, apiKey, exec.signal, budget)
       const mapped = mapAgentResponse(data)
       return {
         ...mapped.content !== undefined ? { content: mapped.content } : {},

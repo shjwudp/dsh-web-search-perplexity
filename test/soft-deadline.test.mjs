@@ -197,6 +197,39 @@ console.log('\n1. soft deadline -> degraded fast fallback')
   check('the status reports the deadline that was in force', markerStatus?.softTimeoutMs === 300, JSON.stringify(markerStatus))
 }
 
+// ── 1b. Search and research share one background submit + poll path ───────────
+// Both agent-backed calls go through the same helper, so they cannot drift in
+// how they submit, poll, cancel, or report. A search that still sent one long
+// synchronous request would fail on the network's terms, not the budget's.
+console.log('\n1b. a search submits in the background and polls, like research')
+{
+  const queued = () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    json: async () => ({ id: 'resp_search', status: 'queued', output: [] }),
+  })
+  const calls = []
+  globalThis.fetch = async (url, init) => {
+    const index = calls.length
+    calls.push({ url: String(url), method: init?.method, body: init?.body !== undefined ? JSON.parse(init.body) : undefined })
+    return index === 0 ? queued() : agentOk('polled search answer')
+  }
+  const provider = makeProvider({ ...baseConfig, softTimeoutMs: 5000 })
+  const result = await provider.search({ query: 'polled question', maxResults: 5 }, new AbortController().signal)
+
+  check('the submit asks for a background run',
+    calls[0]?.method === 'POST' && calls[0]?.body?.background === true,
+    `${calls[0]?.method} background=${calls[0]?.body?.background}`)
+  check('the search then polls the run by id',
+    calls[1]?.method === 'GET' && calls[1]?.url.endsWith('/v1/agent/resp_search'),
+    `${calls[1]?.method} ${calls[1]?.url}`)
+  check('the polled answer reaches the caller',
+    String(result.content).includes('polled search answer'), String(result.content).slice(0, 80))
+  check('a search that finished inside its deadline is not labelled degraded',
+    !String(result.content).includes('Degraded result'), String(result.content).slice(0, 80))
+}
+
 // ── 2. An outer cancellation never retries: no budget is left ──────────────────
 console.log('\n2. outer (harness) cancellation -> no fallback')
 {
@@ -374,11 +407,13 @@ console.log('\n7. an already-aborted signal does not wait out the 429 backoff')
 
   check('the call rejected', error !== undefined)
   check('rejection is the abort, not a timeout rewrite', error?.code === 'WEB_ABORTED', `code=${error?.code}`)
-  // Discriminating assertion: without the already-aborted guard the backoff runs
-  // its full 500ms and a SECOND request is issued before the abort is noticed.
-  check('no further request was issued while backing off', calls.length === 1, `calls=${calls.length}`)
+  // Discriminating assertion: a caller that is already gone must not cause a
+  // request at all. Issuing one would spend a run (and money) on behalf of a
+  // caller that cannot receive the answer, and a 429 response would then start a
+  // backoff the abort has to interrupt.
+  check('no request was issued for an already-cancelled call', calls.length === 0, `calls=${calls.length}`)
   check(
-    'the backoff did not run to completion',
+    'the backoff never started',
     elapsed < Number(RETRY_AFTER) * 1000,
     `elapsed=${elapsed}ms of a ${Number(RETRY_AFTER) * 1000}ms backoff`,
   )

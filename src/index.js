@@ -54,6 +54,7 @@ import { WebError } from '@deepseek-ai/dsh-web'
 import { PERPLEXITY_RESEARCH_SKILL } from './skill.js'
 import { PerplexitySearchApiProvider, SEARCH_API_PROVIDER_ID } from './search-api.js'
 import { DEFAULT_RESEARCH_TIMEOUT_MS, applyResearchTool, researchTimeoutMs } from './research.js'
+import { AGENT_POLL_INTERVAL_SHORT_MS, AgentDeadlineError, runAgentRequest } from './agent-run.js'
 import { canParseURL, isAbortError, requestJson as postJson, resolveApiKey } from './shared.js'
 
 export const name = 'web-search-perplexity'
@@ -601,44 +602,6 @@ function resolveOptions(ctx, config) {
   }
 }
 
-/** Abort reason marking OUR soft deadline, distinct from an outer cancellation. */
-const SOFT_DEADLINE = 'PERPLEXITY_SOFT_DEADLINE'
-
-/**
- * Arm a soft deadline over the caller's signal.
- *
- * The returned signal aborts when either the outer signal aborts (a harness
- * tool-budget cancellation) or this timer expires. `expired()` separates the
- * two, and that distinction is what makes a degraded retry safe: only our own
- * timer may trigger one, because an outer cancellation means no budget is left
- * to retry inside.
- *
- * @param outerSignal - the signal the web seam forwarded, when it forwarded one.
- * @param ms - the soft budget in milliseconds.
- * @returns the derived signal, an expiry test, and a disarm function.
- */
-function softDeadline(outerSignal, ms) {
-  const controller = new AbortController()
-  const onOuterAbort = () => controller.abort(outerSignal.reason)
-  if (outerSignal !== undefined) {
-    if (outerSignal.aborted) controller.abort(outerSignal.reason)
-    else outerSignal.addEventListener('abort', onOuterAbort, { once: true })
-  }
-  // The timer is deliberately NOT unref'd: it is the mechanism that bounds the
-  // request, so it must be able to fire even when nothing else holds the event
-  // loop open. Every caller clears it in a `finally`, so it cannot outlive the
-  // search that armed it.
-  const timer = setTimeout(() => controller.abort(SOFT_DEADLINE), ms)
-  return {
-    signal: controller.signal,
-    expired: () => controller.signal.aborted && controller.signal.reason === SOFT_DEADLINE,
-    clear: () => {
-      clearTimeout(timer)
-      if (outerSignal !== undefined) outerSignal.removeEventListener('abort', onOuterAbort)
-    },
-  }
-}
-
 /** Build the Agent API request body for one preset. */
 function agentRequestBody(request, options, preset) {
   const body = {
@@ -840,15 +803,16 @@ export function apply(ctx, config = {}) {
       // A query naming an image (local file or public https URL) becomes the
       // request's image content; every other query stays the text question.
       const imageRequest = await buildImageRequest([request.query], options)
-      const url = `${options.baseURL}/v1/agent`
       const preset = options.preset
+      const agentBody = (chosenPreset) => (imageRequest !== undefined
+        ? agentImageRequestBody(imageRequest.body, options, chosenPreset)
+        : agentRequestBody(request, options, chosenPreset))
 
-      // No soft deadline configured: one request, exactly as before.
+      // No soft deadline configured: one background run with no wait limit
+      // beyond the caller's own cancellation.
       if (!(options.softTimeoutMs > 0)) {
-        const body = imageRequest !== undefined
-          ? agentImageRequestBody(imageRequest.body, options, preset)
-          : agentRequestBody(request, options, options.preset)
-        const data = await requestJson(url, apiKey, body, signal)
+        const data = await runAgentRequest(
+          agentBody(options.preset), options, apiKey, signal, 0, AGENT_POLL_INTERVAL_SHORT_MS)
         const mapped = imageRequest !== undefined
           ? withImageMarker(mapAgentResponse(data), imageRequest.marker)
           : mapAgentResponse(data)
@@ -860,25 +824,22 @@ export function apply(ctx, config = {}) {
       }
 
       const deadlineMs = imageRequest !== undefined ? options.imageDeadlineMs : options.softTimeoutMs
-      const primary = softDeadline(signal, deadlineMs)
+      // A search runs through the same background submit and poll as the
+      // research tool, with a deadline the plugin enforces instead of a fetch
+      // it aborts. That is what makes giving up clean rather than lossy: on
+      // expiry the remote run is cancelled and named, where aborting a fetch
+      // left it running and discarded the answer.
       let primaryData
       let softTimedOut = false
       try {
-        if (imageRequest !== undefined) {
-          primaryData = await requestJson(
-            url, apiKey, agentImageRequestBody(imageRequest.body, options, preset), primary.signal)
-        } else {
-          primaryData = await requestJson(
-            url, apiKey, agentRequestBody(request, options, options.preset), primary.signal)
-        }
+        primaryData = await runAgentRequest(
+          agentBody(preset), options, apiKey, signal, deadlineMs, AGENT_POLL_INTERVAL_SHORT_MS)
       } catch (error) {
         // Only OUR deadline may degrade the answer. An outer cancellation is
         // the harness tool budget: no time is left for a retry. Any other
         // error is a real provider failure, not a latency problem.
-        if (!primary.expired() || (signal !== undefined && signal.aborted)) throw error
+        if (!(error instanceof AgentDeadlineError) || (signal !== undefined && signal.aborted)) throw error
         softTimedOut = true
-      } finally {
-        primary.clear()
       }
       if (!softTimedOut) {
         const mapped = imageRequest !== undefined
@@ -892,19 +853,17 @@ export function apply(ctx, config = {}) {
       }
 
       // The degraded retry: a shallow answer inside the budget beats the opaque
-      // `tool call timed out` result the caller would otherwise receive.
-      const fallback = softDeadline(signal, FALLBACK_TIMEOUT_MS)
+      // `tool call timed out` result the caller would otherwise receive. It gets
+      // its own deadline, so the whole search still fits the tool budget.
       try {
-        const body = imageRequest !== undefined
-          ? agentImageRequestBody(imageRequest.body, options, preset)
-          : agentRequestBody(request, options, options.fallbackPreset)
-        const data = await requestJson(url, apiKey, body, fallback.signal, 1)
+        const data = await runAgentRequest(
+          agentBody(options.fallbackPreset), options, apiKey, signal, FALLBACK_TIMEOUT_MS, AGENT_POLL_INTERVAL_SHORT_MS)
         const mapped = degradedAgentResult(data, { ...options, preset })
         return imageRequest !== undefined
           ? { ...withImageMarker(mapped, imageRequest.marker), images: imageRequest.marker }
           : mapped
       } catch (error) {
-        if (fallback.expired() && !(signal !== undefined && signal.aborted)) {
+        if (error instanceof AgentDeadlineError && !(signal !== undefined && signal.aborted)) {
           throw new WebError(
             `Perplexity agent search passed its ${Math.round(deadlineMs / 1000)}s soft deadline, and the `
             + `"${options.fallbackPreset}" fallback did not finish within `
@@ -915,8 +874,6 @@ export function apply(ctx, config = {}) {
             'WEB_PROVIDER_ERROR', { cause: error })
         }
         throw error
-      } finally {
-        fallback.clear()
       }
     },
   })
