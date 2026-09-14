@@ -123,6 +123,16 @@ function agentOk(text) {
   }
 }
 
+/** One stubbed HTTP response carrying `data` at `status`. */
+function jsonResponse(data, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: () => null },
+    json: async () => data,
+  }
+}
+
 /** Minimal execution context: the tool only reads `signal`. */
 const exec = { signal: new AbortController().signal }
 
@@ -133,7 +143,7 @@ console.log('\n1. the tool declares its own timeout budget')
 {
   const { tool } = makeTool(baseConfig)
   check('a default budget is declared',
-    tool.timeoutMs === DEFAULT_RESEARCH_TIMEOUT_MS && DEFAULT_RESEARCH_TIMEOUT_MS === 600_000,
+    tool.timeoutMs === DEFAULT_RESEARCH_TIMEOUT_MS && DEFAULT_RESEARCH_TIMEOUT_MS === 1_800_000,
     `timeoutMs=${tool.timeoutMs}`)
   check('the budget is far beyond the shipped tool-web search budget',
     tool.timeoutMs > 60_000, `${tool.timeoutMs} vs 60000`)
@@ -291,6 +301,111 @@ console.log('\n8. a missing registry is named, not skipped')
   check('the plugin refuses a context without tools/systemPrompt', error !== undefined)
   check('the message names the missing service',
     /"(tools|systemPrompt)"/.test(String(error?.message)), String(error?.message).slice(0, 140))
+}
+
+// ── 9. A research run is submitted in the background and polled ───────────
+// The Agent API's documented pattern for runs that take minutes. Holding one
+// connection open for the whole run is what failed on long `high` calls
+// (`fetch failed <- SocketError: other side closed`), so these pin the
+// asynchronous shape rather than any particular timing.
+console.log('\n9. the run is submitted in the background and polled by id')
+{
+  /** A transport stub that answers in order, recording method and url. */
+  const sequence = (responses) => {
+    const calls = []
+    globalThis.fetch = async (url, init) => {
+      calls.push({
+        url: String(url),
+        method: init?.method,
+        body: init?.body !== undefined ? JSON.parse(init.body) : undefined,
+      })
+      const next = responses.shift()
+      if (next === undefined) throw new Error(`unexpected extra request: ${init?.method} ${url}`)
+      return next
+    }
+    return calls
+  }
+  const queued = () => jsonResponse({ id: 'resp_1', status: 'queued', output: [] })
+  const completed = (text) => jsonResponse({
+    id: 'resp_1',
+    status: 'completed',
+    output: [
+      { type: 'message', content: [{ type: 'output_text', text }] },
+      { type: 'search_results', results: [{ url: 'https://example.com/a', title: 'A' }] },
+    ],
+  })
+
+  // 9a. Submit is background, the poll is a GET, and the answer still arrives.
+  const calls = sequence([queued(), completed('polled answer')])
+  const value = await makeTool(baseConfig).tool.execute({ question: 'q', depth: 'high' }, exec)
+  check('the submit asks for a background run',
+    calls[0]?.method === 'POST' && calls[0]?.body?.background === true,
+    `${calls[0]?.method} background=${calls[0]?.body?.background}`)
+  check('the poll is a GET on the response id',
+    calls[1]?.method === 'GET' && calls[1]?.url.endsWith('/v1/agent/resp_1'),
+    `${calls[1]?.method} ${calls[1]?.url}`)
+  check('a GET poll sends no body', calls[1]?.body === undefined)
+  check('the polled answer is returned', value?.content === 'polled answer', JSON.stringify(value?.content))
+  check('its sources survive the poll', value?.sources?.[0]?.url === 'https://example.com/a',
+    JSON.stringify(value?.sources))
+
+  // 9b. A run that is still going must be polled again, not reported as done.
+  const twice = sequence([queued(), jsonResponse({ id: 'resp_1', status: 'in_progress', output: [] }),
+    completed('second poll')])
+  const waited = await makeTool(baseConfig).tool.execute({ question: 'q' }, exec)
+  check('a non-terminal status is polled again rather than returned',
+    waited?.content === 'second poll' && twice.length === 3, `requests=${twice.length}`)
+
+  // 9c. A failing poll must NOT abandon a run that is still going: the run is
+  // unaffected by a bad poll, and the id still identifies it.
+  const flaky = sequence([queued(), jsonResponse({ error: { message: 'bad gateway' } }, 502),
+    completed('survived a blip')])
+  const survived = await makeTool(baseConfig).tool.execute({ question: 'q' }, exec)
+  check('a transient poll failure does not lose the run',
+    survived?.content === 'survived a blip', JSON.stringify(survived?.content))
+
+  // 9d. A failed run is a provider error that names its id.
+  const failed = sequence([queued(),
+    jsonResponse({ id: 'resp_1', status: 'failed', error: { message: 'run blew up' }, output: [] })])
+  let failure
+  try {
+    await makeTool(baseConfig).tool.execute({ question: 'q' }, exec)
+  } catch (caught) {
+    failure = caught
+  }
+  check('a failed run rejects as a provider error',
+    failure?.code === 'WEB_PROVIDER_ERROR', String(failure?.code))
+  check('the failure names the run and the reason',
+    String(failure?.message).includes('resp_1') && String(failure?.message).includes('run blew up'),
+    String(failure?.message))
+  check('no polling happened for a terminal submit', failed.length === 2, `requests=${failed.length}`)
+}
+
+// ── 10. Giving up reports the id instead of losing the run ────────────────
+// The budget bounds the wait, but a run that outlives it has still been paid
+// for: the message must say how to collect it, and the run must be cancelled so
+// it stops costing money.
+console.log('\n10. an expired budget names the run and cancels it')
+{
+  const seen = []
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url: String(url), method: init?.method })
+    if (String(url).endsWith('/cancel')) return jsonResponse({ status: 'cancelling' })
+    if (init?.method === 'GET') return jsonResponse({ id: 'resp_9', status: 'in_progress', output: [] })
+    return jsonResponse({ id: 'resp_9', status: 'queued', output: [] })
+  }
+  let error
+  try {
+    // A tiny budget keeps the loop short; the first poll already exceeds it.
+    await makeTool({ ...baseConfig, researchTimeoutMs: 1 }).tool.execute({ question: 'q' }, exec)
+  } catch (caught) {
+    error = caught
+  }
+  const cancelled = seen.some((call) => call.url.endsWith('/v1/agent/resp_9/cancel'))
+  check('an expired budget is a provider error', error?.code === 'WEB_PROVIDER_ERROR', String(error?.code))
+  check('the message carries the id so the run can still be collected',
+    String(error?.message).includes('resp_9'), String(error?.message).slice(0, 200))
+  check('the abandoned run is cancelled rather than left running', cancelled, JSON.stringify(seen))
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)

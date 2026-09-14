@@ -246,54 +246,58 @@ export function describeErrorCause(error, depth = 0) {
 }
 
 /**
- * POST one JSON request and return the parsed response body.
+ * Send one JSON request and return the parsed response body.
  *
  * A 429 is retried with `Retry-After` honored when present, so a first-call
  * rate limit self-heals instead of surfacing as an error. Redirects are
  * rejected before the `Location` target is contacted, so the bearer credential
  * never follows a redirect to another origin.
  *
- * `Connection: close` is sent so the connection is not kept alive and reused.
- * The host failed with `UND_ERR_SOCKET: other side closed` ~4 minutes into a
- * process that had just succeeded, which is undici handing a new POST a
- * keep-alive socket the other end had already closed. Closing the connection
- * is the fix that needs no retry: `UND_ERR_SOCKET` says the peer closed the
- * socket, NOT that the request went unprocessed, and `/v1/agent` is a long
- * task — so a blind resend of a POST that may already be running risks
- * duplicate work, which is worse than a clean failure. Not reusing the socket
- * removes the failure mode instead of recovering from it. The cost is one TLS
- * handshake per call, which is irrelevant next to a multi-second research
- * request. Prefer this over installing an `undici.Agent`: a request-scoped
+ * `method` exists for the Agent API's background retrieval (`GET
+ * /v1/agent/{id}`), which shares every failure mode below but sends no body. A
+ * GET must not declare a JSON content type, so those headers are added only
+ * when a body is actually sent.
+ *
+ * `Connection: close` is sent so no keep-alive socket survives the request.
+ * This is hardening, NOT the fix for the `UND_ERR_SOCKET: other side closed`
+ * failures: those were measured on a *fresh* connection and still happened with
+ * this header set, so reuse was never the cause. The real cause is a long
+ * `/v1/agent` run outliving the connection (see `waitForAgentResponse`). The
+ * header still earns its place during background polling, which issues many
+ * short requests in a row and would otherwise hand a stale socket to one of
+ * them. Prefer it over installing an `undici.Agent`: a request-scoped
  * dispatcher would also override Node's own proxy handling, and a broken proxy
  * path is a worse regression than the socket reuse this avoids.
  *
  * @param url - absolute endpoint URL.
  * @param apiKey - bearer credential.
- * @param body - request body.
+ * @param body - request body, or `undefined` for a bodyless request.
  * @param signal - optional cancellation signal.
  * @param webError - the `WebError` class to construct failures with.
  * @param messagePrefix - phrase naming the operation, e.g. `Perplexity search`.
  * @param retries - how many times a 429 may be retried.
+ * @param method - HTTP method; `POST` unless a caller says otherwise.
  * @returns the parsed response body.
  * @throws when the request fails, is rejected, or its body is unreadable.
  */
-export async function requestJson(url, apiKey, body, signal, webError, messagePrefix, retries = 2) {
+export async function requestJson(url, apiKey, body, signal, webError, messagePrefix, retries = 2, method = 'POST') {
+  const sendsBody = body !== undefined
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     let response
     try {
       response = await fetch(url, {
-        method: 'POST',
+        method,
         redirect: 'error',
         headers: {
           authorization: `Bearer ${apiKey}`,
-          'content-type': 'application/json',
+          ...(sendsBody ? { 'content-type': 'application/json' } : {}),
           accept: 'application/json',
           'user-agent': USER_AGENT,
           // Do not leave a reusable keep-alive socket behind; see the note on
-          // this function for why not reusing beats retrying here.
+          // this function.
           connection: 'close',
         },
-        body: JSON.stringify(body),
+        ...(sendsBody ? { body: JSON.stringify(body) } : {}),
         ...(signal !== undefined ? { signal } : {}),
       })
     } catch (error) {

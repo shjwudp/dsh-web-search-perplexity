@@ -794,7 +794,6 @@ export function apply(ctx, config = {}) {
     buildImageRequest,
     degradationStatus,
     mapAgentResponse,
-    requestJson,
     resolveApiKey,
     resolveOptions,
   })
