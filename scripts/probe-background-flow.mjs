@@ -42,7 +42,11 @@ if (key === undefined) {
   process.exit(2)
 }
 const base = 'https://api.perplexity.ai'
-console.log(`key length=${key.length} | base=${base}`)
+// `--long` repeats the exact shape that failed synchronously: a high-depth
+// research prompt. A stub cannot show that a real run outlives the window the
+// network used to allow a single connection, so that is the honest check.
+const long = process.argv.includes('--long')
+console.log(`key length=${key.length} | base=${base} | mode=${long ? 'long (high preset)' : 'quick (low preset)'}`)
 
 /** One request, reporting status and a bounded slice of the body. */
 async function call(method, url, body) {
@@ -77,40 +81,58 @@ async function call(method, url, body) {
   return { status: response.status, body: parsed }
 }
 
-// 1. Submit in the background with the cheapest preset: the documented call
-//    must return immediately with `queued`, not block for the whole run.
-const submit = await call('POST', `${base}/v1/agent`, {
-  preset: 'low',
-  background: true,
-  input: 'Reply with exactly the word: ok',
-})
+// 1. Submit in the background: the documented call must return immediately with
+//    `queued`, not block for the whole run.
+const submit = await call('POST', `${base}/v1/agent`, long
+  ? {
+    preset: 'high',
+    background: true,
+    input: 'Compare HTTP/1.1 keep-alive connection reuse with HTTP/2 multiplexing: the tradeoffs, how '
+      + 'server and CDN idle timeouts affect clients that pool connections, and which client-side '
+      + 'strategies reduce failures from reusing a connection the server has already closed.',
+  }
+  : {
+    preset: 'low',
+    background: true,
+    input: 'Reply with exactly the word: ok',
+  })
 const id = submit.body?.id
 if (typeof id !== 'string' || id.length === 0) {
   console.log('\nRESULT: no id returned — background submit did not behave as documented')
   process.exit(1)
 }
 
-// 2. Poll by id, the way the tool does, until terminal.
+// 2. Poll by id, the way the tool does, until terminal. The long mode is the
+//    point of the exercise: it must survive well past the ~180s at which a
+//    single synchronous connection was dropped.
 const terminal = ['completed', 'failed', 'cancelled', 'incomplete']
 let status = submit.body.status
 const polls = []
-for (let i = 0; i < 40 && !terminal.includes(status); i += 1) {
-  await new Promise((resolve) => setTimeout(resolve, 1000))
+const started = Date.now()
+const maxPolls = long ? 400 : 40
+const maxWaitMs = long ? 900_000 : 60_000
+for (let i = 0; i < maxPolls && !terminal.includes(status); i += 1) {
+  if (Date.now() - started > maxWaitMs) break
+  await new Promise((resolve) => setTimeout(resolve, long ? 3000 : 1000))
   const poll = await call('GET', `${base}/v1/agent/${id}`)
   status = poll.body?.status
   polls.push(status)
-  if (status === 'completed') {
+  if (status === 'completed' || status === 'incomplete') {
     const texts = []
+    let sources = 0
     for (const item of poll.body.output ?? []) {
       if (item.type === 'message') {
         for (const block of item.content ?? []) if (block.type === 'output_text') texts.push(block.text)
       }
+      if (item.type === 'search_results') sources += (item.results ?? []).length
     }
     console.log(`  extracted answer: ${JSON.stringify(texts.join(' ').slice(0, 120))}`)
+    console.log(`  answer chars=${texts.join(' ').length} sources=${sources}`)
     break
   }
 }
 
-console.log(`\nRESULT: submit=${submit.body.status} polls=${polls.length} final=${status}`)
-console.log(`RESULT: retrieval by id worked = ${polls.length > 0}`)
+const elapsedS = ((Date.now() - started) / 1000).toFixed(1)
+console.log(`\nRESULT: submit=${submit.body.status} polls=${polls.length} final=${status} waited=${elapsedS}s`)
+console.log(`RESULT: polled past 60s (the old single-connection window) = ${Number(elapsedS) > 60}`)
 process.exit(terminal.includes(status) && polls.length > 0 ? 0 : 1)
