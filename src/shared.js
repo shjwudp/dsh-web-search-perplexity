@@ -142,23 +142,71 @@ export function redactProxyValue(value) {
 }
 
 /**
+ * Load time of this module, used as a fallback clock for process age when
+ * `process.uptime()` is unavailable.
+ */
+const MODULE_LOADED_AT = Date.now()
+
+/**
+ * Describe which process is asking, and how long it has been alive.
+ *
+ * The host process is a variable, not a constant: the same request succeeded
+ * one minute after a host started and failed four minutes later in the same
+ * process, and restarting healed it. So every failure has to name the process
+ * that produced it. Without that, "which instance was this?" is unanswerable
+ * from the message alone, and a per-process state bug looks like an
+ * intermittent network fault.
+ *
+ * `pid` identifies the host instance; `uptime` is its age in seconds, which is
+ * the value that made the in-process degradation visible at all. `started` is
+ * the same fact in wall-clock form, so a reader can correlate a failure with a
+ * restart without having to know when the message was produced. The clock is
+ * only read here, inside the failure path, so a successful call pays nothing.
+ *
+ * @returns one line naming the process id, its uptime, and its start time.
+ */
+export function describeProcess() {
+  const uptimeMs = typeof process.uptime === 'function'
+    ? process.uptime() * 1000
+    : Date.now() - MODULE_LOADED_AT
+  let started
+  try {
+    // Epoch milliseconds on Node 20+, where `getCreationTime` gives the clock
+    // directly. Where it is absent, `Date.now() - uptimeMs` is used instead:
+    // exact to within the process age, and still enough to identify the
+    // restart, which is the whole point of the field.
+    const creation = process.getCreationTime?.()
+    const startedMs = typeof creation === 'number' ? creation : Date.now() - uptimeMs
+    started = new Date(startedMs).toISOString()
+  } catch (error) {
+    // A diagnostic must never be the reason a failure goes unreported, but it
+    // must not hide its own failure behind a placeholder either: naming why the
+    // absolute clock was unavailable is the difference between "cannot tell"
+    // and "this field is broken".
+    started = `(unavailable: ${String(error?.message ?? error)})`
+  }
+  return `pid=${process.pid} uptime=${(uptimeMs / 1000).toFixed(1)}s started=${started}`
+}
+
+/**
  * Describe the runtime configuration a connection failure depends on.
  *
  * A `fetch` failure that happens in one process and not another on the same
- * machine is decided by something outside the request: the runtime version, and
- * the proxy variables that process actually sees. Node's `fetch` ignores the
- * proxy environment — a harness installs a dispatcher when it wants them honored
- * — but a long-lived host can have those names written at runtime, which no
- * external observer can see. Reporting them here makes the next failure carry
- * its own answer.
+ * machine is decided by something outside the request: the runtime version, the
+ * process's own identity and age, and the proxy variables that process actually
+ * sees. Node's `fetch` ignores the proxy environment — a harness installs a
+ * dispatcher when it wants them honored — but a long-lived host can have those
+ * names written at runtime, which no external observer can see. Reporting them
+ * here makes the next failure carry its own answer.
  *
- * @returns one line naming the runtime and every set proxy variable, redacted.
+ * @returns one line naming the runtime, the process, and every set proxy
+ * variable, redacted.
  */
 export function describeRuntime() {
   const proxy = PROXY_ENV_NAMES
     .filter((name) => process.env[name] !== undefined && process.env[name] !== '')
     .map((name) => `${name}=${redactProxyValue(String(process.env[name]))}`)
-  return `runtime=node/${process.version} ${proxy.length > 0 ? proxy.join(' ') : 'proxy=(none set)'}`
+  return `${describeProcess()} runtime=node/${process.version} ${proxy.length > 0 ? proxy.join(' ') : 'proxy=(none set)'}`
 }
 
 /**
@@ -205,6 +253,20 @@ export function describeErrorCause(error, depth = 0) {
  * rejected before the `Location` target is contacted, so the bearer credential
  * never follows a redirect to another origin.
  *
+ * `Connection: close` is sent so the connection is not kept alive and reused.
+ * The host failed with `UND_ERR_SOCKET: other side closed` ~4 minutes into a
+ * process that had just succeeded, which is undici handing a new POST a
+ * keep-alive socket the other end had already closed. Closing the connection
+ * is the fix that needs no retry: `UND_ERR_SOCKET` says the peer closed the
+ * socket, NOT that the request went unprocessed, and `/v1/agent` is a long
+ * task — so a blind resend of a POST that may already be running risks
+ * duplicate work, which is worse than a clean failure. Not reusing the socket
+ * removes the failure mode instead of recovering from it. The cost is one TLS
+ * handshake per call, which is irrelevant next to a multi-second research
+ * request. Prefer this over installing an `undici.Agent`: a request-scoped
+ * dispatcher would also override Node's own proxy handling, and a broken proxy
+ * path is a worse regression than the socket reuse this avoids.
+ *
  * @param url - absolute endpoint URL.
  * @param apiKey - bearer credential.
  * @param body - request body.
@@ -227,6 +289,9 @@ export async function requestJson(url, apiKey, body, signal, webError, messagePr
           'content-type': 'application/json',
           accept: 'application/json',
           'user-agent': USER_AGENT,
+          // Do not leave a reusable keep-alive socket behind; see the note on
+          // this function for why not reusing beats retrying here.
+          connection: 'close',
         },
         body: JSON.stringify(body),
         ...(signal !== undefined ? { signal } : {}),
