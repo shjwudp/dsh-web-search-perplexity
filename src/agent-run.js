@@ -36,6 +36,15 @@ export const AGENT_TERMINAL_STATUSES = Object.freeze(['completed', 'failed', 'ca
 export const AGENT_POLL_INTERVAL_MS = 3_000
 
 /**
+ * How many extra attempts an unbilled backend failure gets.
+ *
+ * One, not a backoff ladder: the fault observed in practice was transient (the
+ * same request succeeded on the next try), and a research call is expensive
+ * enough that a second wasted minute is worse than reporting the failure.
+ */
+export const MAX_UNBILLED_RETRIES = 1
+
+/**
  * Poll cadence for a call with a tight budget, in milliseconds.
  *
  * `web_search` must answer inside a 60 s tool budget, so a 1–3 s cadence would
@@ -74,6 +83,52 @@ async function cancelAgentResponse(options, apiKey, id) {
     // Intentionally empty: the run may still be found later by id, and the
     // caller is already receiving the reason this call ended early.
   }
+}
+
+/**
+ * Raised when the API reported a run as failed, carrying what it reported.
+ *
+ * The response is kept because the failure itself decides whether a retry is
+ * safe: an API-side `model_error` that generated nothing is a backend fault
+ * worth one more attempt, while a run that already produced (and billed) output
+ * must never be repeated.
+ */
+export class AgentRunError extends WebError {
+  /**
+   * @param response - the terminal response snapshot with `status: 'failed'`.
+   */
+  constructor(response) {
+    const id = response?.id
+    const detail = response?.error?.message ?? response?.error?.code
+    super(
+      `Perplexity run failed (response ${String(id)})`
+      + `${detail !== undefined ? `: ${String(detail)}` : ` with status ${String(response?.status)}`}`,
+      'WEB_PROVIDER_ERROR',
+    )
+    this.name = 'AgentRunError'
+    this.responseId = id
+    this.response = response
+    this.errorCode = response?.error?.code
+  }
+}
+
+/**
+ * True when a failed run generated nothing, and did not bill anything.
+ *
+ * This is the condition that makes a second attempt safe. A research request is
+ * long and expensive, so a wasted failure is worth retrying — but only when the
+ * API says no output was produced. A run whose `usage` is present has been
+ * billed for work that already happened, and repeating it could duplicate the
+ * result the caller wanted once, so it is reported instead.
+ *
+ * @param response - the API's own terminal snapshot for a failed run.
+ * @returns whether a retry cannot duplicate anything.
+ */
+export function isUnbilledFailure(response) {
+  if (response === null || typeof response !== 'object') return false
+  if (response.status !== 'failed') return false
+  const usage = response.usage
+  return usage === null || usage === undefined
 }
 
 /**
@@ -164,12 +219,9 @@ async function pollUntilTerminal(id, options, apiKey, signal, deadline, pollInte
           'WEB_PROVIDER_ERROR',
         )
       }
-      const detail = snapshot.error?.message ?? snapshot.error?.code
-      throw new WebError(
-        `Perplexity run failed (response ${id})`
-        + `${detail !== undefined ? `: ${String(detail)}` : ` with status ${String(snapshot.status)}`}`,
-        'WEB_PROVIDER_ERROR',
-      )
+      // Any other terminal status is `failed`. The snapshot is carried into the
+      // error so the retry decision can consult what the API actually reported.
+      throw new AgentRunError(snapshot)
     }
 
     // Still `queued` or `in_progress`.
@@ -239,46 +291,71 @@ export async function runAgentRequest(body, options, apiKey, signal, timeoutMs, 
   const deadlineError = (lastError) => new AgentDeadlineError(lastError, started.id, options.baseURL)
 
   try {
-    let submitted
-    try {
-      submitted = await requestJson(
-        `${options.baseURL}/v1/agent`,
-        apiKey,
-        { ...body, background: true },
-        controller.signal,
-        WebError,
-        'Perplexity search',
-        0,
-        'POST',
-      )
-    } catch (error) {
-      // The deadline firing *during the submit* is still our deadline: the
-      // degraded retry may not begin, or a search would silently lose the
-      // distinction between "slow" and "cancelled". The submit carries no run
-      // id yet, so there is nothing to cancel here.
-      if (isExpired()) throw deadlineError()
-      throw error
+    let lastUnbilled
+    for (let attempt = 0; attempt <= MAX_UNBILLED_RETRIES; attempt += 1) {
+      if (attempt > 0) {
+        // Only a wasted run is worth repeating, and only if the deadline still
+        // leaves room to finish. A search that has spent most of its budget
+        // must report its failure and let the caller degrade instead of
+        // starting a run it cannot wait for.
+        const remaining = deadline - Date.now()
+        if (remaining !== Number.POSITIVE_INFINITY && remaining < Math.ceil(timeoutMs / 2)) break
+      }
+
+      let submitted
+      try {
+        submitted = await requestJson(
+          `${options.baseURL}/v1/agent`,
+          apiKey,
+          { ...body, background: true },
+          controller.signal,
+          WebError,
+          'Perplexity search',
+          0,
+          'POST',
+        )
+      } catch (error) {
+        // The deadline firing *during the submit* is still our deadline: the
+        // degraded retry may not begin, or a search would silently lose the
+        // distinction between "slow" and "cancelled". The submit carries no run
+        // id yet, so there is nothing to cancel here.
+        if (isExpired()) throw deadlineError()
+        throw error
+      }
+      if (submitted !== null && typeof submitted === 'object' && AGENT_TERMINAL_STATUSES.includes(submitted.status)) {
+        // A response that is already terminal needs no id: it is passed straight
+        // to the caller's mapper, which is also what keeps an unrecognised body
+        // shape a "no answer" rather than a hard error. That is deliberate — a
+        // response in the deleted chat-completions shape must not be mistaken for
+        // an Agent answer, and must not be turned into a failure either.
+        return submitted
+      }
+      const id = submitted?.id
+      if (typeof id !== 'string' || id.length === 0) {
+        // No id and no terminal status: nothing to poll, so hand the body to the
+        // caller's mapper. It recognizes the Agent output shape and reports "no
+        // answer" for anything else, which is the behaviour callers had before
+        // background mode and is the honest outcome for a body this code cannot
+        // interpret — better than inventing a failure for it.
+        return submitted
+      }
+      started.id = id
+      try {
+        return await pollUntilTerminal(
+          id, options, apiKey, controller.signal, deadline, pollIntervalMs, isExpired, cancelRunIfStarted)
+      } catch (error) {
+        // The retry is for one specific fault: the API ran the research and then
+        // the model produced nothing, so the run cost nothing and its answer is
+        // recoverable by asking again. `usage: null` is what makes that safe. A
+        // run that billed for output may already hold the answer, so it is
+        // reported rather than repeated.
+        if (!(error instanceof AgentRunError) || !isUnbilledFailure(error.response)) throw error
+        lastUnbilled = error
+      }
     }
-    if (submitted !== null && typeof submitted === 'object' && AGENT_TERMINAL_STATUSES.includes(submitted.status)) {
-      // A response that is already terminal needs no id: it is passed straight
-      // to the caller's mapper, which is also what keeps an unrecognised body
-      // shape a "no answer" rather than a hard error. That is deliberate — a
-      // response in the deleted chat-completions shape must not be mistaken for
-      // an Agent answer, and must not be turned into a failure either.
-      return submitted
-    }
-    const id = submitted?.id
-    if (typeof id !== 'string' || id.length === 0) {
-      // No id and no terminal status: nothing to poll, so hand the body to the
-      // caller's mapper. It recognizes the Agent output shape and reports "no
-      // answer" for anything else, which is the behaviour callers had before
-      // background mode and is the honest outcome for a body this code cannot
-      // interpret — better than inventing a failure for it.
-      return submitted
-    }
-    started.id = id
-    return await pollUntilTerminal(
-      id, options, apiKey, controller.signal, deadline, pollIntervalMs, isExpired, cancelRunIfStarted)
+    // Every attempt was an unpaid backend failure; report the last one, which
+    // still names its run id.
+    throw lastUnbilled
   } finally {
     if (timer !== undefined) clearTimeout(timer)
     if (signal !== undefined) signal.removeEventListener('abort', onOuterAbort)

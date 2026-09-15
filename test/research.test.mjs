@@ -365,8 +365,16 @@ console.log('\n9. the run is submitted in the background and polled by id')
     survived?.content === 'survived a blip', JSON.stringify(survived?.content))
 
   // 9d. A failed run is a provider error that names its id.
+  // A failed run that the API billed for may already hold the answer, so it is
+  // reported rather than repeated. `usage` present is what marks it as billed.
   const failed = sequence([queued(),
-    jsonResponse({ id: 'resp_1', status: 'failed', error: { message: 'run blew up' }, output: [] })])
+    jsonResponse({
+      id: 'resp_1',
+      status: 'failed',
+      error: { message: 'run blew up' },
+      usage: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
+      output: [],
+    })])
   let failure
   try {
     await makeTool(baseConfig).tool.execute({ question: 'q' }, exec)
@@ -378,7 +386,58 @@ console.log('\n9. the run is submitted in the background and polled by id')
   check('the failure names the run and the reason',
     String(failure?.message).includes('resp_1') && String(failure?.message).includes('run blew up'),
     String(failure?.message))
-  check('no polling happened for a terminal submit', failed.length === 2, `requests=${failed.length}`)
+  check('a billed failure is not retried', failed.length === 2, `requests=${failed.length}`)
+}
+
+// ── 9e. An UNBILLED backend failure is retried once, safely ────────────────
+// The fault seen in practice: the API ran the research, then the model produced
+// nothing (`echolot: ... (reasoning_only)`), with `usage: null`. Nothing was
+// generated and nothing was billed, so asking again cannot duplicate work — and
+// a research run is expensive enough that one wasted failure is worth repeating.
+console.log('\n9e. an unbilled failure is retried once')
+{
+  const sequence = (responses) => {
+    const calls = []
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), method: init?.method })
+      const next = responses.shift()
+      if (next === undefined) throw new Error(`unexpected extra request: ${init?.method} ${url}`)
+      return next
+    }
+    return calls
+  }
+  const queued = () => jsonResponse({ id: 'resp_r', status: 'queued', output: [] })
+  const unbilledFailure = () => jsonResponse({
+    id: 'resp_r',
+    status: 'failed',
+    usage: null,
+    error: { code: 'model_error', message: 'echolot: model produced no usable answer: no usable answer (reasoning_only)' },
+    output: [],
+  })
+  const completed = jsonResponse({
+    id: 'resp_r',
+    status: 'completed',
+    output: [{ type: 'message', content: [{ type: 'output_text', text: 'answer after retry' }] }],
+  })
+
+  const calls = sequence([queued(), unbilledFailure(), queued(), completed])
+  const value = await makeTool(baseConfig).tool.execute({ question: 'q', depth: 'high' }, exec)
+  check('the unbilled failure was retried and the answer returned',
+    value?.content === 'answer after retry', JSON.stringify(value?.content))
+  check('the retry was a fresh background run, polled again',
+    calls.length === 4 && calls[2]?.method === 'POST' && calls[3]?.method === 'GET',
+    JSON.stringify(calls.map((call) => call.method)))
+
+  // A second unbilled failure is reported, not retried forever.
+  const twice = sequence([queued(), unbilledFailure(), queued(), unbilledFailure()])
+  let failure
+  try {
+    await makeTool(baseConfig).tool.execute({ question: 'q' }, exec)
+  } catch (caught) {
+    failure = caught
+  }
+  check('a second unbilled failure is reported rather than retried again',
+    twice.length === 4 && String(failure?.message).includes('resp_r'), `requests=${twice.length}`)
 }
 
 // ── 10. Giving up reports the id instead of losing the run ────────────────
