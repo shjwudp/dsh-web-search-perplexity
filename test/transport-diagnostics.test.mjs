@@ -13,7 +13,7 @@
  */
 
 import { WebError } from '@deepseek-ai/dsh-web'
-import { describeErrorCause, describeProcess, describeRuntime, redactProxyValue, requestJson } from '../src/shared.js'
+import { describeErrorCause, describeProcess, describeRuntime, isAbortError, redactProxyValue, requestJson } from '../src/shared.js'
 
 let failures = 0
 function check(name, condition, detail = '') {
@@ -54,6 +54,26 @@ console.log('\n2. an aggregate failure lists each attempt')
   })
   const rendered = describeErrorCause(aggregate)
   check('both attempts appear', rendered.includes('ECONNREFUSED') && rendered.includes('ETIMEDOUT'), rendered)
+}
+
+// ── 3b. A bounded attempt must still report its failure, not a cancellation ──
+// `AbortSignal.timeout()` aborts with a DOMException named `TimeoutError`, not
+// `AbortError`. That signal is how a probe bounds one attempt while keeping the
+// underlying connection error as the thing reported; if `isAbortError` treated a
+// timeout as a cancellation, every dead-address probe below would report
+// "aborted" instead of a code, its endpoint, and its cause — losing the
+// diagnosis this suite exists to guarantee. Callers that need a timeout-shaped
+// abort to mean cancellation check for it themselves.
+console.log('\n3b. a TimeoutError is NOT swallowed as a cancellation')
+{
+  const abort = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })
+  const timedOut = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })
+  check('an AbortError is an abort', isAbortError(abort) === true)
+  check('a TimeoutError is left to report its own failure', isAbortError(timedOut) === false,
+    String(isAbortError(timedOut)))
+  check('an unrelated failure is not an abort',
+    isAbortError(Object.assign(new Error('boom'), { name: 'Error' })) === false)
+  check('an undefined value is not an abort', isAbortError(undefined) === false)
 }
 
 // ── 3. Odd values never throw the formatter ────────────────────────────────

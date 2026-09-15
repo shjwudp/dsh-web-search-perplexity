@@ -419,5 +419,51 @@ console.log('\n7. an already-aborted signal does not wait out the 429 backoff')
   )
 }
 
+// ── 8. A user cancelling mid-run cancels the REMOTE run, not just the wait ────
+// This is what a message sent while the tool is still running causes: the agent
+// loop aborts the step's signal. A long research call must not leave its run
+// executing (and billing) on Perplexity's side after the caller has gone, and
+// the tool must report a cancellation rather than a provider failure.
+console.log('\n8. an abort mid-run cancels the run on the server')
+{
+  const answer = (data) => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    json: async () => data,
+  })
+  const outer = new AbortController()
+  const calls = []
+  globalThis.fetch = async (url, init) => {
+    const method = init?.method
+    const target = String(url)
+    calls.push({ url: target, method })
+    if (target.endsWith('/cancel')) return answer({ status: 'cancelling' })
+    if (method === 'GET') {
+      // Abort while the caller is waiting for this poll, exactly as a
+      // mid-execution user message would.
+      outer.abort()
+      const error = new Error('This operation was aborted')
+      error.name = 'AbortError'
+      throw error
+    }
+    return answer({ id: 'resp_cancel', status: 'queued', output: [] })
+  }
+  const provider = makeProvider({ ...baseConfig, softTimeoutMs: 30_000 })
+  let error
+  try {
+    await provider.search({ query: 'cancelled mid-run', maxResults: 5 }, outer.signal)
+  } catch (caught) {
+    error = caught
+  }
+
+  check('the abort is reported as a cancellation', error?.code === 'WEB_ABORTED', `code=${error?.code}`)
+  check('the remote run was cancelled on the server',
+    calls.some((call) => call.url.endsWith('/v1/agent/resp_cancel/cancel')),
+    JSON.stringify(calls.map((call) => `${call.method} ${call.url}`)))
+  check('the cancel is a POST issued after the caller left',
+    calls.find((call) => call.url.endsWith('/cancel'))?.method === 'POST')
+}
+
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)
 process.exit(failures === 0 ? 0 : 1)

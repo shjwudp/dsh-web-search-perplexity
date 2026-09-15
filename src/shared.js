@@ -32,8 +32,16 @@ export function canParseURL(value) {
  * True for a fetch or `AbortSignal` abort, which the providers surface as
  * `WEB_ABORTED` rather than as a provider failure.
  *
+ * Deliberately narrow: only `AbortError`. `AbortSignal.timeout()` aborts with a
+ * `TimeoutError` instead, and callers use that signal precisely to bound an
+ * *attempt* while keeping the underlying failure — the connection error, with
+ * its machine-readable code — as what gets reported. Widening this to
+ * `TimeoutError` would relabel every such probe as a cancellation and throw the
+ * diagnosis away. Callers that must treat a timeout-shaped abort as a
+ * cancellation check for it themselves.
+ *
  * @param error - value caught from a request.
- * @returns whether it is an abort.
+ * @returns whether it is a cancellation abort.
  */
 export function isAbortError(error) {
   return (error instanceof Error && error.name === 'AbortError')

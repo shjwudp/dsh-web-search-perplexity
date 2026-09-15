@@ -181,15 +181,21 @@ async function pollUntilTerminal(id, options, apiKey, signal, deadline, pollInte
   // finished, and starting at the steady cadence would waste budget on nothing.
   let waitMs = Math.min(pollIntervalMs, 1_000)
   let lastError
+  // A poll can end because the signal aborted, or because this call's deadline
+  // timer fired. Both must cancel the remote run; only the second is a deadline.
+  // `isAbortError` stays narrow (see `shared.js`) because callers elsewhere rely
+  // on a bounded attempt still reporting its connection error, so a
+  // timeout-shaped abort is recognized here, where it means a cancellation.
+  const wasAborted = (error) => isAbortError(error) || error?.name === 'TimeoutError'
 
   for (;;) {
     try {
       await sleep(waitMs, signal)
     } catch (error) {
-      if (isAbortError(error)) {
+      if (wasAborted(error)) {
         await cancelRun()
         if (isExpired()) throw new AgentDeadlineError(error, id)
-        throw new WebError('Perplexity search aborted', 'WEB_ABORTED', { cause: error })
+        throw new WebError('Perplexity request aborted', 'WEB_ABORTED', { cause: error })
       }
       throw error
     }
@@ -281,7 +287,7 @@ export async function runAgentRequest(body, options, apiKey, signal, timeoutMs, 
   const isExpired = () => expired && !(signal !== undefined && signal.aborted)
   // Report a cancellation before anything else — before the submit, and before
   // any retry or poll, so an already-cancelled call issues no request at all.
-  if (signal?.aborted) throw new WebError('Perplexity search aborted', 'WEB_ABORTED')
+  if (signal?.aborted) throw new WebError('Perplexity request aborted', 'WEB_ABORTED')
   // The id only exists after the submit below; a holder lets both abort paths
   // cancel a run that was already started without reordering the setup.
   const started = { id: undefined }
