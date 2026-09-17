@@ -5,19 +5,12 @@ a DSH agent quick web lookups, and a second tool for research that takes minutes
 
 ## What it does
 
-```mermaid
-flowchart TD
-    A["A task needs current, external information"] --> B["web_search<br/>quick fact · a few lookups · 60 s budget"]
-    A --> C["perplexity_research<br/>one question · many sources · 30 min budget"]
-    B --> D["this plugin<br/>the Perplexity provider behind the ctx.web seam"]
-    C --> D
-    D -->|"background submit, then poll"| E["Agent API<br/>POST /v1/agent — default"]
-    D -.->|"searchProvider: perplexity-search"| F["Search API<br/>POST /search"]
-    E --> G["cited answer + sources<br/>image input supported"]
-    F --> H["ranked hits: URL · title · snippet · date"]
-    G --> A
-    H --> A
-```
+![How this plugin fits into DSH and Perplexity](docs/architecture.svg)
+
+*DSH supplies the agent session, the `ctx.web` seam and the configuration; this
+plugin registers two Perplexity providers into that seam and adds the research tool;
+the Agent and Search APIs are the two of Perplexity's four published surfaces that
+the plugin uses. Open the image for the full-size version.*
 
 - **Answers, not just links.** By default searches go to Perplexity's Agent API, which
   returns a synthesized answer with its sources, mapped into the seam's normalized

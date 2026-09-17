@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 984" width="1180" height="984"
+     role="img" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+  <title>How this plugin fits into DSH and Perplexity</title>
+  <desc>A three-layer diagram. The DSH host supplies the agent session, the ctx.web seam and the
+  configuration. This plugin registers two Perplexity search providers into that seam and contributes
+  the perplexity_research tool plus its skill. The plugin calls two of Perplexity's four published
+  APIs: the Agent API by default and the Search API when selected. Router and Embeddings are not used.</desc>
+
+  <style>
+    .bg { fill: #ffffff }
+    .band { fill: #f7f9fc; stroke: #dbe2ec; stroke-width: 1 }
+    .bandPlugin { fill: #f2f6ff; stroke: #c3d2f2 }
+    .bandApi { fill: #f9f7fd; stroke: #ddd2f0 }
+    .panel { fill: #ffffff; stroke: #e2e7ef; stroke-width: 1 }
+    .dash { fill: #fbfbfc; stroke: #d5d8de; stroke-width: 1; stroke-dasharray: 4 3 }
+    .t { font-size: 14px; font-weight: 700; fill: #1b2430 }
+    .pt { font-size: 13px; font-weight: 600; fill: #2a3644 }
+    .b { font-size: 13px; fill: #46536a }
+    .m { font-size: 12px; fill: #33415a;
+         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace }
+    .mut { font-size: 12.5px; fill: #6b7789 }
+    .chipT { font-size: 13.5px; font-weight: 600; fill: #2a3644 }
+    .chipS { font-size: 12px; fill: #6b7789 }
+    .barHost { fill: #6b7f99 }
+    .barPlugin { fill: #2f6fd0 }
+    .barApi { fill: #7a5cd0 }
+    .dotUsed { fill: #2f6fd0 }
+    .arrow { stroke: #7c8aa0; stroke-width: 1.8; fill: none }
+    .ah { fill: #7c8aa0 }
+
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0f1318 }
+      .band { fill: #171c23; stroke: #2c3542 }
+      .bandPlugin { fill: #151b26; stroke: #2c3a55 }
+      .bandApi { fill: #191624; stroke: #392f4d }
+      .panel { fill: #1b2129; stroke: #2f3946 }
+      .dash { fill: #171b21; stroke: #333b46 }
+      .t { fill: #e8edf4 }
+      .pt { fill: #dbe3ee }
+      .b { fill: #a9b6c7 }
+      .m { fill: #c2cddd }
+      .mut { fill: #8b98aa }
+      .chipT { fill: #dbe3ee }
+      .chipS { fill: #8b98aa }
+      .arrow { stroke: #8b98aa }
+      .ah { fill: #8b98aa }
+      .dotUsed { fill: #6ea0f0 }
+    }
+  </style>
+
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path class="ah" d="M 0 0 L 10 5 L 0 10 z"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1180" height="984"/>
+
+  <text class="t" x="24" y="38" font-size="17px">How this plugin fits into DSH and Perplexity</text>
+  <text class="mut" x="24" y="60">One plugin: a Perplexity search provider for the ctx.web seam, plus a tool for research that takes minutes.</text>
+
+  <!-- ============================ BAND 1: DSH host ============================ -->
+  <rect class="band" x="20" y="78" width="1140" height="168" rx="12"/>
+  <rect class="barHost" x="34" y="90" width="4" height="16" rx="2"/>
+  <text class="t" x="48" y="104">DSH host</text>
+
+  <rect class="panel" x="36" y="118" width="348" height="112" rx="9"/>
+  <text class="pt" x="50" y="140">Agent session</text>
+  <text class="b" x="50" y="162">model-facing tools available to the model:</text>
+  <text class="m" x="50" y="181">web_search · web_fetch<tspan x="250">dsh-tool-web</tspan></text>
+  <text class="m" x="50" y="200">perplexity_research<tspan x="250">this plugin</tspan></text>
+  <text class="mut" x="50" y="219">the model decides which one a task needs</text>
+
+  <rect class="panel" x="410" y="118" width="348" height="112" rx="9"/>
+  <text class="pt" x="424" y="140">ctx.web seam</text>
+  <text class="b" x="424" y="162">the contract implemented here:</text>
+  <text class="m" x="424" y="181">WebSearchProvider</text>
+  <text class="m" x="424" y="200">available() · search(request, signal)</text>
+  <text class="mut" x="424" y="219">exactly one provider may report usable</text>
+
+  <rect class="panel" x="784" y="118" width="348" height="112" rx="9"/>
+  <text class="pt" x="798" y="140">Configuration</text>
+  <text class="m" x="798" y="162">settings.yaml → web-search-perplexity</text>
+  <text class="b" x="798" y="181">preset · searchProvider · softTimeoutMs</text>
+  <text class="b" x="798" y="200">researchDepth · researchTimeoutMs</text>
+  <text class="m" x="798" y="219">agent preset → tool-web.searchTimeoutMs</text>
+
+  <!-- ======================= IO 1: DSH <-> this plugin ======================== -->
+  <path class="arrow" d="M 300 256 L 300 318" marker-end="url(#ah)"/>
+  <text class="b" x="316" y="274" font-weight="600">search(request, signal) — { query, maxResults }</text>
+  <text class="mut" x="316" y="294">or the tool call — perplexity_research { question, depth }</text>
+
+  <path class="arrow" d="M 800 318 L 800 256" marker-end="url(#ah)"/>
+  <text class="b" x="816" y="274" font-weight="600">WebSearchResult { content, sources[], truncated }</text>
+  <text class="mut" x="816" y="294">+ degradation and images on the seam object</text>
+
+  <!-- ============================ BAND 2: this plugin ========================= -->
+  <rect class="bandPlugin" x="20" y="330" width="1140" height="248" rx="12"/>
+  <rect class="barPlugin" x="34" y="342" width="4" height="16" rx="2"/>
+  <text class="t" x="48" y="356">This plugin — @shjwudp/dsh-web-search-perplexity</text>
+
+  <rect class="panel" x="36" y="374" width="544" height="88" rx="9"/>
+  <text class="pt" x="50" y="396">Registers two search providers into ctx.web</text>
+  <text class="m" x="50" y="416">perplexity<tspan x="210">→ Agent API (default)</tspan></text>
+  <text class="m" x="50" y="434">perplexity-search<tspan x="210">→ Search API (opt-in)</tspan></text>
+  <text class="mut" x="380" y="416">selected by searchProvider</text>
+  <text class="mut" x="380" y="434">only one is usable at a time</text>
+  <text class="mut" x="50" y="452">web_search → the selected provider · perplexity_research → the Agent API only</text>
+
+  <rect class="panel" x="592" y="374" width="544" height="88" rx="9"/>
+  <text class="pt" x="606" y="396">Contributes to the session</text>
+  <text class="m" x="606" y="416">tool<tspan x="680">perplexity_research — one question, its own budget</tspan></text>
+  <text class="m" x="606" y="434">skill<tspan x="680">perplexity-research — guidance loaded on demand</tspan></text>
+  <text class="mut" x="606" y="452">config: researchDepth (low · medium · high · wide) · researchTimeoutMs (30 min)</text>
+
+  <rect class="panel" x="36" y="474" width="544" height="88" rx="9"/>
+  <text class="pt" x="50" y="496">Transport core — src/shared.js · src/agent-run.js</text>
+  <text class="b" x="50" y="516">background submit + poll; cancel the run when the deadline expires</text>
+  <text class="b" x="50" y="534">429 → capped backoff, and every fact the message needs</text>
+  <text class="b" x="50" y="552">connection failure → cause chain, HTTP method, pid and uptime</text>
+
+  <rect class="panel" x="592" y="474" width="544" height="88" rx="9"/>
+  <text class="pt" x="606" y="496">Also handled here</text>
+  <text class="b" x="606" y="516">a degraded retry, marked machine-readably, not only in prose</text>
+  <text class="b" x="606" y="534">image guards: media type · signature · size · imageRoots</text>
+  <text class="b" x="606" y="552">settings card (src/client.js) — zh/en, write-only API key</text>
+
+  <!-- ==================== IO 2: this plugin <-> Perplexity ==================== -->
+  <path class="arrow" d="M 300 578 L 300 650" marker-end="url(#ah)"/>
+  <text class="b" x="316" y="606" font-weight="600">POST /v1/agent { input, tools, preset, background: true }</text>
+  <text class="mut" x="316" y="626">POST /search { query, max_results, filters }</text>
+
+  <path class="arrow" d="M 800 650 L 800 578" marker-end="url(#ah)"/>
+  <text class="b" x="816" y="606" font-weight="600">GET /v1/agent/{id} → { status, output[] }</text>
+  <text class="mut" x="816" y="626">POST /search → { results[] }</text>
+
+  <!-- ========================= BAND 3: Perplexity API ========================= -->
+  <rect class="bandApi" x="20" y="662" width="1140" height="302" rx="12"/>
+  <rect class="barApi" x="34" y="674" width="4" height="16" rx="2"/>
+  <text class="t" x="48" y="688">Perplexity API</text>
+  <text class="mut" x="1156" y="688" text-anchor="end">four published surfaces — this plugin uses two</text>
+
+  <rect class="dash" x="36" y="698" width="262" height="32" rx="8"/>
+  <text class="chipT" x="50" y="719">Router</text>
+  <text class="chipS" x="284" y="719" text-anchor="end">not used</text>
+
+  <rect class="panel" x="310" y="698" width="262" height="32" rx="8"/>
+  <circle class="dotUsed" cx="322" cy="714" r="3.5"/>
+  <text class="chipT" x="334" y="719">Agent API</text>
+  <text class="chipS" x="558" y="719" text-anchor="end">used · default</text>
+
+  <rect class="panel" x="584" y="698" width="262" height="32" rx="8"/>
+  <circle class="dotUsed" cx="596" cy="714" r="3.5"/>
+  <text class="chipT" x="608" y="719">Search API</text>
+  <text class="chipS" x="832" y="719" text-anchor="end">used · opt-in</text>
+
+  <rect class="dash" x="858" y="698" width="262" height="32" rx="8"/>
+  <text class="chipT" x="872" y="719">Embeddings</text>
+  <text class="chipS" x="1106" y="719" text-anchor="end">not used</text>
+
+  <rect class="panel" x="36" y="744" width="544" height="142" rx="9"/>
+  <text class="pt" x="50" y="766">Agent API — the default backend</text>
+  <text class="m" x="50" y="788">POST /v1/agent<tspan x="240">submit with background: true</tspan></text>
+  <text class="m" x="50" y="807">GET  /v1/agent/{id}<tspan x="240">poll until the status is terminal</tspan></text>
+  <text class="m" x="50" y="826">POST /v1/agent/{id}/cancel<tspan x="290">when a deadline expires</tspan></text>
+  <text class="b" x="50" y="848">presets: fast · low · medium · high · xhigh · wide-research</text>
+  <text class="b" x="50" y="868">returns output[]: the answer message + search_results[]; takes input_image</text>
+
+  <rect class="panel" x="592" y="744" width="544" height="142" rx="9"/>
+  <text class="pt" x="606" y="766">Search API — the opt-in backend</text>
+  <text class="m" x="606" y="788">POST /search</text>
+  <text class="b" x="606" y="808">returns results[] only — no generated answer</text>
+  <text class="b" x="606" y="828">max_results · domains · languages · country</text>
+  <text class="b" x="606" y="848">publication dates · recency · search_type: people</text>
+  <text class="b" x="606" y="868">selected with searchProvider: perplexity-search</text>
+
+  <rect class="dash" x="36" y="912" width="1084" height="48" rx="9"/>
+  <text class="mut" x="50" y="933">Router and Embeddings are published but unused here: Router serves open-weight models through OpenAI- and Anthropic-compatible endpoints, and</text>
+  <text class="mut" x="50" y="951">Embeddings produces vectors. Neither answers a question. Sonar, the Agent API's predecessor, is supported until 2026-09-27 and is not used either.</text>
+</svg>
