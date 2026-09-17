@@ -96,12 +96,14 @@ async function cancelAgentResponse(options, apiKey, id) {
 export class AgentRunError extends WebError {
   /**
    * @param response - the terminal response snapshot with `status: 'failed'`.
+   * @param message - the message to report; omitted when this module has
+   *   nothing to add, so the API's own words pass through unchanged.
    */
-  constructor(response) {
+  constructor(response, message) {
     const id = response?.id
     const detail = response?.error?.message ?? response?.error?.code
     super(
-      `Perplexity run failed (response ${String(id)})`
+      message ?? `Perplexity run failed (response ${String(id)})`
       + `${detail !== undefined ? `: ${String(detail)}` : ` with status ${String(response?.status)}`}`,
       'WEB_PROVIDER_ERROR',
     )
@@ -129,6 +131,181 @@ export function isUnbilledFailure(response) {
   if (response.status !== 'failed') return false
   const usage = response.usage
   return usage === null || usage === undefined
+}
+
+/** Machine-readable `failureKind` for a run whose model stage emitted nothing. */
+export const MODEL_NO_OUTPUT = 'model_no_output'
+
+/**
+ * Count what a run's stored output actually holds.
+ *
+ * The distinction this exists for: a failed run can hold every retrieval item
+ * and no answer at all. `status: 'failed'` and the API's own prose cannot say
+ * which of those happened, so the counts are read from the output itself and
+ * reported alongside the error.
+ *
+ * @param response - the API's own terminal snapshot.
+ * @returns the item counts, all zero for a response with no output array.
+ */
+export function summarizeAgentOutput(response) {
+  const items = Array.isArray(response?.output) ? response.output : []
+  const summary = {
+    itemCount: items.length,
+    messageItems: 0,
+    answerChars: 0,
+    searchResultBatches: 0,
+    fetchUrlBatches: 0,
+    otherItemTypes: [],
+  }
+  for (const item of items) {
+    if (item?.type === 'message') {
+      summary.messageItems += 1
+      for (const block of item.content ?? []) {
+        if (block?.type === 'output_text' && typeof block.text === 'string') {
+          summary.answerChars += block.text.length
+        }
+      }
+    } else if (item?.type === 'search_results') {
+      summary.searchResultBatches += 1
+    } else if (item?.type === 'fetch_url_results') {
+      summary.fetchUrlBatches += 1
+    } else if (item?.type !== undefined) {
+      summary.otherItemTypes.push(String(item.type))
+    }
+  }
+  return summary
+}
+
+/**
+ * True when a failed run produced no answer message at all.
+ *
+ * This is the observable shape of the `reasoning_only` / model-stage fault: the
+ * run is terminal and `failed`, the retrieval items are all there, and
+ * `output` holds no `message` item. Billing is a separate axis — see
+ * {@link isUnbilledFailure} — because a run can emit nothing and still be
+ * charged for the tool calls it made.
+ *
+ * Deliberately not a claim about the cause: the classification says what the
+ * API returned, not why the model produced nothing.
+ *
+ * @param response - the API's own terminal snapshot.
+ * @returns whether the run failed with zero answer messages.
+ */
+export function isModelNoOutputFailure(response) {
+  if (response === null || typeof response !== 'object') return false
+  if (response.status !== 'failed') return false
+  return summarizeAgentOutput(response).messageItems === 0
+}
+
+/** Render the retrieval-vs-answer counts as one clause. */
+function describeModelStageOutput(summary) {
+  const batches = []
+  if (summary.searchResultBatches > 0) {
+    batches.push(`${summary.searchResultBatches} search-result ${summary.searchResultBatches === 1 ? 'batch' : 'batches'}`)
+  }
+  if (summary.fetchUrlBatches > 0) {
+    batches.push(`${summary.fetchUrlBatches} URL-fetch ${summary.fetchUrlBatches === 1 ? 'batch' : 'batches'}`)
+  }
+  const retrieval = batches.length > 0
+    ? `the retrieval stage ran (${batches.join(' and ')})`
+    : 'no retrieval items were recorded'
+  return `${retrieval}, then the model stage emitted nothing: ${summary.messageItems} message items and ${summary.answerChars} answer characters`
+}
+
+/**
+ * Raised when a run failed with the model stage having produced no answer.
+ *
+ * Its own class, because the three failure classes call for different next
+ * moves and the API's prose does not separate them: a 429 says wait, a
+ * connection failure says the request never arrived, and this says the request
+ * arrived, the research ran, and the backend returned nothing. The message names
+ * the machine facts a reader needs to tell those apart — the upstream
+ * `error.code`, the run id, that retrieval completed and how much of it, that
+ * zero message items came back, and whether anything was billed — and the same
+ * facts are attached as fields for a caller that routes on structure.
+ *
+ * `invalid_request` is reported verbatim like any other code. It is *not* taken
+ * to mean this side's request body was rejected: these runs were accepted and
+ * completed their retrieval, so the code describes the model stage, and
+ * rewriting the request would be changing the wrong thing.
+ */
+export class AgentModelNoOutputError extends AgentRunError {
+  /**
+   * @param response - the terminal snapshot with `status: 'failed'`.
+   * @param context - what the run asked for and where it can be retrieved.
+   */
+  constructor(response, context = {}) {
+    const summary = summarizeAgentOutput(response)
+    const billed = !(response?.usage === null || response?.usage === undefined)
+    const preset = typeof context.preset === 'string' && context.preset.length > 0 ? context.preset : undefined
+    const model = typeof context.model === 'string' && context.model.length > 0 ? context.model : undefined
+    const upstream = response?.error?.message ?? response?.error?.code
+    const ids = Array.isArray(context.responseIds) && context.responseIds.length > 0
+      ? context.responseIds
+      : [response?.id]
+    const subject = [`response ${String(response?.id)}`]
+    // The preset is what was asked for; naming the model instead is only a
+    // fallback for a preset-less request, because with a preset the model is
+    // Perplexity's to choose and changes without notice.
+    if (preset !== undefined) subject.push(`preset ${preset}`)
+    else if (model !== undefined) subject.push(`model ${model}`)
+    if (response?.error?.code !== undefined) subject.push(`upstream code ${String(response.error.code)}`)
+    const parts = [
+      `Perplexity run failed at the model stage (${subject.join(', ')}):`,
+      `${describeModelStageOutput(summary)}.`,
+      billed
+        ? 'The run was billed (usage was reported), so its work is not free to repeat.'
+        : 'Nothing was billed (usage: null).',
+      // Naming the two nearby failure classes is the point of this class: a
+      // reader must not wait out a rate limit or debug a socket for a fault
+      // that is neither.
+      'This is a model-stage backend failure — not a rate limit (no HTTP 429) and not a connection failure.',
+      context.baseURL !== undefined && response?.id !== undefined
+        ? `The run is stored, so its full snapshot can be read with GET ${String(context.baseURL)}/v1/agent/${String(response.id)}.`
+        : '',
+      ids.length > 1
+        ? `All ${ids.length} attempts ended this way (response ids: ${ids.join(', ')}).`
+        : '',
+      upstream !== undefined
+        ? `upstream said: ${JSON.stringify(String(upstream))}`
+        : 'upstream sent no readable error text',
+    ]
+    super(response, parts.filter((part) => part !== '').join(' '))
+    this.name = 'AgentModelNoOutputError'
+    this.failureKind = MODEL_NO_OUTPUT
+    this.preset = preset
+    this.model = model
+    this.billed = billed
+    this.retrievalCompleted = summary.searchResultBatches + summary.fetchUrlBatches > 0
+    this.messageItems = summary.messageItems
+    this.answerChars = summary.answerChars
+    this.searchResultBatches = summary.searchResultBatches
+    this.fetchUrlBatches = summary.fetchUrlBatches
+    this.attempts = ids.length
+    this.responseIds = ids
+  }
+}
+
+/**
+ * The error for one terminal `failed` snapshot.
+ *
+ * Separate from the constructor so `pollUntilTerminal` reports what it saw
+ * without deciding the classification itself.
+ *
+ * @param snapshot - the terminal response snapshot.
+ * @param context - the preset/model the run asked for.
+ * @param baseURL - endpoint base, so the message can name the retrieval URL.
+ * @returns the classified error to throw.
+ */
+function failedAgentRunError(snapshot, context, baseURL) {
+  if (isModelNoOutputFailure(snapshot)) {
+    return new AgentModelNoOutputError(snapshot, {
+      preset: context?.preset,
+      model: context?.model,
+      baseURL,
+    })
+  }
+  return new AgentRunError(snapshot)
 }
 
 /**
@@ -171,11 +348,12 @@ export class AgentDeadlineError extends WebError {
  * @param signal - cancellation signal: the caller's, plus this call's deadline.
  * @param deadline - epoch milliseconds to stop waiting at.
  * @param pollIntervalMs - steady-state poll interval.
+ * @param context - the preset/model this run asked for, recorded on a failure.
  * @returns the terminal response object, for `completed` or `incomplete`.
  * @throws {AgentDeadlineError} when the deadline passes first.
  * @throws {WebError} when the run fails or the caller cancels.
  */
-async function pollUntilTerminal(id, options, apiKey, signal, deadline, pollIntervalMs, isExpired, cancelRun) {
+async function pollUntilTerminal(id, options, apiKey, signal, deadline, pollIntervalMs, isExpired, cancelRun, context) {
   const url = `${options.baseURL}/v1/agent/${encodeURIComponent(id)}`
   // A first poll does not need a full interval: a short run is often already
   // finished, and starting at the steady cadence would waste budget on nothing.
@@ -226,8 +404,10 @@ async function pollUntilTerminal(id, options, apiKey, signal, deadline, pollInte
         )
       }
       // Any other terminal status is `failed`. The snapshot is carried into the
-      // error so the retry decision can consult what the API actually reported.
-      throw new AgentRunError(snapshot)
+      // error so the retry decision can consult what the API actually reported,
+      // and a failure that produced no answer message at all is reported as its
+      // own class rather than as a generic run failure.
+      throw failedAgentRunError(snapshot, context, options.baseURL)
     }
 
     // Still `queued` or `in_progress`.
@@ -297,7 +477,17 @@ export async function runAgentRequest(body, options, apiKey, signal, timeoutMs, 
   const deadlineError = (lastError) => new AgentDeadlineError(lastError, started.id, options.baseURL)
 
   try {
-    let lastUnbilled
+    // The preset and explicit model are read once, from the body actually sent,
+    // so a failure report names what this run asked Perplexity for rather than
+    // what the settings said at some other moment.
+    const requestedPreset = typeof body?.preset === 'string' && body.preset.length > 0 ? body.preset : undefined
+    const requestedModel = typeof body?.model === 'string' && body.model.length > 0 ? body.model : undefined
+    const runContext = { preset: requestedPreset, model: requestedModel }
+    // Every unbilled failure is kept, not only the last: "failed once" and
+    // "failed twice" are different facts, and the response ids of both attempts
+    // are what an incident report — and Perplexity's own retrieval endpoint —
+    // need. A billed failure never reaches here; it is thrown immediately.
+    const unbilledFailures = []
     for (let attempt = 0; attempt <= MAX_UNBILLED_RETRIES; attempt += 1) {
       if (attempt > 0) {
         // Only a wasted run is worth repeating, and only if the deadline still
@@ -348,7 +538,7 @@ export async function runAgentRequest(body, options, apiKey, signal, timeoutMs, 
       started.id = id
       try {
         return await pollUntilTerminal(
-          id, options, apiKey, controller.signal, deadline, pollIntervalMs, isExpired, cancelRunIfStarted)
+          id, options, apiKey, controller.signal, deadline, pollIntervalMs, isExpired, cancelRunIfStarted, runContext)
       } catch (error) {
         // The retry is for one specific fault: the API ran the research and then
         // the model produced nothing, so the run cost nothing and its answer is
@@ -356,11 +546,21 @@ export async function runAgentRequest(body, options, apiKey, signal, timeoutMs, 
         // run that billed for output may already hold the answer, so it is
         // reported rather than repeated.
         if (!(error instanceof AgentRunError) || !isUnbilledFailure(error.response)) throw error
-        lastUnbilled = error
+        unbilledFailures.push(error)
       }
     }
     // Every attempt was an unpaid backend failure; report the last one, which
-    // still names its run id.
+    // still names its run id. When the fault is the model-stage one, the error
+    // is rebuilt so its message states the attempt count and lists every run id
+    // instead of describing only the attempt that happened to be last.
+    const lastUnbilled = unbilledFailures[unbilledFailures.length - 1]
+    if (lastUnbilled instanceof AgentModelNoOutputError) {
+      throw new AgentModelNoOutputError(lastUnbilled.response, {
+        ...runContext,
+        baseURL: options.baseURL,
+        responseIds: unbilledFailures.map((failure) => failure.responseId),
+      })
+    }
     throw lastUnbilled
   } finally {
     if (timer !== undefined) clearTimeout(timer)

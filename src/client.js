@@ -57,6 +57,8 @@ window.__ModuleLoader__.load({
           'field.searchMaxTokensPerPage': '每页最大 token',
           'field.searchAfterDate': '发布于该日期之后（MM/DD/YYYY）',
           'field.searchBeforeDate': '发布于该日期之前（MM/DD/YYYY）',
+          'field.researchDepth': '默认研究强度（depth）',
+          'field.researchTimeoutMs': '研究调用预算（毫秒）',
           'backend.agent': 'Agent API — 生成答案 + 引用',
           'backend.search': 'Search API — 结构化结果，无生成答案',
           'searchType.web': 'web — 网页搜索',
@@ -82,6 +84,18 @@ window.__ModuleLoader__.load({
           'placeholder.imageRoots': '留空 = 不限制',
           'placeholder.commaList': 'a.example, b.example',
           'placeholder.optional': '默认值',
+          'researchDepth.default': '跟随默认（low）',
+          'researchDepth.low': 'low — 轻量多步（默认）',
+          'researchDepth.medium': 'medium — 多跳浏览',
+          'researchDepth.high': 'high — 穷尽覆盖，慢且贵',
+          'researchDepth.wide': 'wide — 大规模资料收集，分钟级',
+          'note.researchDepth': '只影响没有指定 depth 的 research 调用；调用时显式给出的 depth 始终优先。'
+            + '默认 low 是因为强度并不便宜：high 一次可能跑好几分钟、消耗数倍 token，'
+            + '而且（实测）在输出预算偏小时会直接拿不到答案。',
+          'note.researchTimeoutMs': '单次 research 调用的等待预算；留空为 1800000（30 分钟）。'
+            + '填 0 表示不设截止时间。该值在插件加载时读取，改动需要重启 DSH 才生效；'
+            + '上面的研究强度则是每次调用重新读取。',
+          'placeholder.researchTimeoutMs': '1800000',
           'recency.none': '默认（不限）',
           'preset.none': '无（手动选择模型）',
           'preset.fast': 'fast — 单事实检索',
@@ -140,6 +154,8 @@ window.__ModuleLoader__.load({
           'field.searchMaxTokensPerPage': 'Max tokens per page',
           'field.searchAfterDate': 'Published after (MM/DD/YYYY)',
           'field.searchBeforeDate': 'Published before (MM/DD/YYYY)',
+          'field.researchDepth': 'Default research depth',
+          'field.researchTimeoutMs': 'Research budget (ms)',
           'backend.agent': 'Agent API — generated answer + citations',
           'backend.search': 'Search API — ranked results, no generated answer',
           'searchType.web': 'web — general web search',
@@ -167,6 +183,18 @@ window.__ModuleLoader__.load({
           'placeholder.imageRoots': 'empty = no restriction',
           'placeholder.commaList': 'a.example, b.example',
           'placeholder.optional': 'default',
+          'researchDepth.default': 'Preset default (low)',
+          'researchDepth.low': 'low — light multi-step (default)',
+          'researchDepth.medium': 'medium — multi-hop browsing',
+          'researchDepth.high': 'high — exhaustive, slow and costly',
+          'researchDepth.wide': 'wide — large collections, minutes',
+          'note.researchDepth': 'Applies only to a research call that names no depth; an explicit depth always '
+            + 'wins. The default is low because depth is not free: one high run can take minutes, spend several '
+            + 'times the tokens, and — measured — return no answer at all when the output budget is small.',
+          'note.researchTimeoutMs': 'Waiting budget for one research call; empty means 1800000 (30 minutes). '
+            + '0 declares no deadline. Read when the plugin loads, so a change needs a DSH restart — unlike the '
+            + 'depth above, which is read on every call.',
+          'placeholder.researchTimeoutMs': '1800000',
           'recency.none': 'Default (none)',
           'preset.none': 'None (choose model manually)',
           'preset.fast': 'fast — single-fact lookups',
@@ -255,6 +283,17 @@ window.__ModuleLoader__.load({
       const FALLBACK_PRESET_OPTIONS = PRESET_OPTIONS.filter(
         (option) => option.value !== '' && option.value !== 'wide-research',
       )
+      /**
+       * Default research depth. The blank option means "use the built-in
+       * default", which is `low`; `wide` is the `wide-research` preset.
+       */
+      const RESEARCH_DEPTH_OPTIONS = [
+        { value: '', labelKey: 'researchDepth.default' },
+        { value: 'low', labelKey: 'researchDepth.low' },
+        { value: 'medium', labelKey: 'researchDepth.medium' },
+        { value: 'high', labelKey: 'researchDepth.high' },
+        { value: 'wide', labelKey: 'researchDepth.wide' },
+      ]
       /**
        * Agent API models by vendor. Group headings carry `labelKey` so they
        * follow the active locale; the model ids stay literal.
@@ -531,6 +570,8 @@ window.__ModuleLoader__.load({
             numberField('searchMaxTokensPerPage'),
             textField('searchAfterDate'),
             textField('searchBeforeDate'),
+            nonNegativeNumberField('researchTimeoutMs'),
+            selectField('researchDepth', RESEARCH_DEPTH_OPTIONS),
           ].map((spec) => [spec.field, spec]))
           this.staged = new Map()
           this.listeners = new Set()
@@ -584,6 +625,8 @@ window.__ModuleLoader__.load({
             searchMaxTokensPerPage: this.field('searchMaxTokensPerPage'),
             searchAfterDate: this.field('searchAfterDate'),
             searchBeforeDate: this.field('searchBeforeDate'),
+            researchDepth: this.field('researchDepth'),
+            researchTimeoutMs: this.field('researchTimeoutMs'),
             apiKeyText: this.staged.get('apiKey')?.text ?? '',
             apiKeyConfigured: this.credential.configured,
             apiKeyWritable: this.credential.writable,
@@ -954,6 +997,15 @@ window.__ModuleLoader__.load({
                       )
                       : null,
                   ),
+                // Research settings sit outside the backend branch: the research
+                // tool always runs through the Agent API, whatever `searchProvider`
+                // selects for searches.
+                h('div', null,
+                  h(SelectField, { t, label: t('field.researchDepth'), field: 'researchDepth', state: state.researchDepth, disabled, edit: props.edit, options: RESEARCH_DEPTH_OPTIONS }),
+                  h('div', { style: styles.note }, t('note.researchDepth')),
+                  h(Field, { t, label: t('field.researchTimeoutMs'), field: 'researchTimeoutMs', state: state.researchTimeoutMs, disabled, edit: props.edit, placeholder: t('placeholder.researchTimeoutMs') }),
+                  h('div', { style: styles.note }, t('note.researchTimeoutMs')),
+                ),
               ),
             ),
             h('div', { style: styles.row },

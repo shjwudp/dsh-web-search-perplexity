@@ -54,6 +54,7 @@ const {
   RESEARCH_TOOL_NAME,
   formatResearchOutput,
   parseResearchArgs,
+  researchDepth,
   researchTimeoutMs,
 } = plugin
 if (typeof apply !== 'function' || typeof RESEARCH_TOOL_NAME !== 'string') {
@@ -78,6 +79,7 @@ function check(name, condition, detail = '') {
 function makeTool(config) {
   const registered = []
   const sections = []
+  const providers = []
   const ctx = {
     on() {},
     get(name) {
@@ -86,14 +88,14 @@ function makeTool(config) {
       return undefined
     },
     inject() {},
-    web: { registerSearchProvider() {} },
+    web: { registerSearchProvider(provider) { providers.push(provider) } },
     tools: { register(tool) { registered.push(tool); return () => {} } },
     systemPrompt: { section(section) { sections.push(section) }, getSectionOrder: () => 100 },
   }
   apply(ctx, config)
   const tool = registered.find((candidate) => candidate.name === RESEARCH_TOOL_NAME)
   if (tool === undefined) throw new Error(`${RESEARCH_TOOL_NAME} was not registered`)
-  return { tool, sections }
+  return { tool, sections, providers }
 }
 
 /** A fetch stub that records each parsed request body and answers `200`. */
@@ -173,14 +175,38 @@ console.log('\n2. depth selects the Agent preset')
 
   const defaultCalls = stubFetch(() => agentOk('default answer'))
   await makeTool(baseConfig).tool.execute({ question: 'collect items' }, exec)
-  check('an omitted depth defaults to the medium preset',
+  check('an omitted depth defaults to the cheapest offered depth',
     defaultCalls[0]?.body?.preset === RESEARCH_DEPTHS[RESEARCH_DEFAULT_DEPTH].preset
-      && defaultCalls[0]?.body?.preset === 'medium',
+      && defaultCalls[0]?.body?.preset === 'low' && RESEARCH_DEFAULT_DEPTH === 'low',
     JSON.stringify(defaultCalls[0]?.body?.preset))
+  check('the shallowest depth is offered at all',
+    RESEARCH_DEPTHS.low?.preset === 'low' && Object.keys(RESEARCH_DEPTHS)[0] === 'low',
+    JSON.stringify(Object.keys(RESEARCH_DEPTHS)))
+
+  // A deployment may configure a deeper default; anything it does not recognize
+  // must fall back rather than break the tool.
+  const configuredCalls = stubFetch(() => agentOk('configured default'))
+  await makeTool({ ...baseConfig, researchDepth: 'high' }).tool.execute({ question: 'q' }, exec)
+  check('a configured researchDepth becomes the default',
+    configuredCalls[0]?.body?.preset === 'high', JSON.stringify(configuredCalls[0]?.body?.preset))
+
+  const explicitCalls = stubFetch(() => agentOk('explicit wins'))
+  await makeTool({ ...baseConfig, researchDepth: 'high' }).tool.execute({ question: 'q', depth: 'low' }, exec)
+  check('an explicit depth still wins over the configured default',
+    explicitCalls[0]?.body?.preset === 'low', JSON.stringify(explicitCalls[0]?.body?.preset))
+
+  check('the resolver is usable on its own, and ignores an unknown value',
+    researchDepth({ researchDepth: 'high' }) === 'high'
+      && researchDepth({ researchDepth: 'unlimited' }) === RESEARCH_DEFAULT_DEPTH
+      && researchDepth({}) === RESEARCH_DEFAULT_DEPTH
+      && researchDepth(undefined) === RESEARCH_DEFAULT_DEPTH)
 
   const parsed = parseResearchArgs({ question: 'q', depth: 'medium' })
   check('the parser maps depth to preset',
     parsed.preset === 'medium' && parsed.question === 'q', JSON.stringify(parsed))
+  check('the parser takes a configured default',
+    parseResearchArgs({ question: 'q' }, 'wide').preset === 'wide-research',
+    JSON.stringify(parseResearchArgs({ question: 'q' }, 'wide')))
 }
 
 // ── 3. The model's parameters are the documented ones ──────────────────────
@@ -227,6 +253,33 @@ console.log('\n4. the result carries the answer and its sources')
 
   const empty = formatResearchOutput({ sources: [], truncated: false })
   check('an empty result says so', empty.includes('No results found.'), empty.slice(0, 80))
+}
+
+// ── 4b. An `incomplete` run is flagged truncated, not merely described ─────
+// `incomplete` is the API's own truncation status. The prose line told a reader
+// so, but `truncated` — one of the three fields `dsh-tool-web` forwards — stayed
+// `false`, so the only machine-readable truncation signal contradicted the
+// sentence next to it.
+console.log('\n4b. an incomplete run sets the truncated field')
+{
+  stubFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    json: async () => ({
+      status: 'incomplete',
+      output: [
+        { type: 'message', content: [{ type: 'output_text', text: 'half an answer' }] },
+        { type: 'search_results', results: [{ url: 'https://example.com/a', title: 'A' }] },
+      ],
+    }),
+  }))
+  const { tool } = makeTool(baseConfig)
+  const value = await tool.execute({ question: 'q' }, exec)
+  check('the incomplete status becomes the truncated field', value.truncated === true, String(value.truncated))
+  check('the partial answer is still returned', String(value.content).includes('half an answer'), String(value.content))
+  check('the content still says why it is short',
+    String(value.content).includes('Truncated'), String(value.content).slice(-140))
 }
 
 // ── 5. A missing key is a provider error, not a silent call ────────────────
@@ -440,6 +493,55 @@ console.log('\n9e. an unbilled failure is retried once')
     twice.length === 4 && String(failure?.message).includes('resp_r'), `requests=${twice.length}`)
 }
 
+// ── 9f. The model-stage no-output failure reaches the tool caller classified ──
+// The fault from the incident: both attempts ran their whole retrieval and the
+// model produced nothing. The caller must receive a failure that names both run
+// ids, the upstream code, the completed retrieval and that nothing was billed —
+// not one sentence of upstream prose.
+console.log('\n9f. a model-stage failure is reported with every run id')
+{
+  const sequence = (responses) => {
+    const calls = []
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), method: init?.method })
+      const next = responses.shift()
+      if (next === undefined) throw new Error(`unexpected extra request: ${init?.method} ${url}`)
+      return next
+    }
+    return calls
+  }
+  const queued = (id) => jsonResponse({ id, status: 'queued', output: [] })
+  const noAnswer = (id) => jsonResponse({
+    id,
+    status: 'failed',
+    usage: null,
+    error: { code: 'model_error', message: 'echolot: no usable answer (reasoning_only)' },
+    output: [{ type: 'search_results', results: [{ url: 'https://example.com/a' }] }],
+  })
+
+  const calls = sequence([queued('resp_a'), noAnswer('resp_a'), queued('resp_b'), noAnswer('resp_b')])
+  let failure
+  try {
+    await makeTool(baseConfig).tool.execute({ question: 'q', depth: 'high' }, exec)
+  } catch (caught) {
+    failure = caught
+  }
+  check('the tool rejects with the model-stage class, not a generic run failure',
+    failure?.name === 'AgentModelNoOutputError' && failure?.failureKind === 'model_no_output',
+    `${failure?.name}/${failure?.failureKind}`)
+  check('both attempts and both run ids are reported',
+    failure?.attempts === 2 && String(failure?.message).includes('resp_a')
+      && String(failure?.message).includes('resp_b'),
+    String(failure?.message).slice(0, 200))
+  check('the reason is kept alongside the classification',
+    String(failure?.message).includes('reasoning_only'), String(failure?.message).slice(-120))
+  check('the preset the depth selected is named',
+    failure?.preset === 'high' && String(failure?.message).includes('preset high'), String(failure?.preset))
+  check('the retry really was a second background run',
+    calls.length === 4 && calls[2]?.method === 'POST' && calls[3]?.method === 'GET',
+    JSON.stringify(calls.map((call) => call.method)))
+}
+
 // ── 10. Giving up reports the id instead of losing the run ────────────────
 // The budget bounds the wait, but a run that outlives it has still been paid
 // for: the message must say how to collect it, and the run must be cancelled so
@@ -465,6 +567,39 @@ console.log('\n10. an expired budget names the run and cancels it')
   check('the message carries the id so the run can still be collected',
     String(error?.message).includes('resp_9'), String(error?.message).slice(0, 200))
   check('the abandoned run is cancelled rather than left running', cancelled, JSON.stringify(seen))
+}
+
+// ── 11. Research leaves the output budget to the preset; web_search keeps its cap ──
+// The incident's root cause on our side: `maxTokens` (2048 live) overrode the
+// preset's own 128000, and a `high` research run then spent the whole budget
+// before writing an answer — reproducibly returning zero `message` items, once as
+// `incomplete` and once as the incident's `model_error (reasoning_only)`, while
+// the same question uncapped answered fully. Research therefore omits the field.
+// `web_search` is unchanged: a short answer is that tool's point, so the contrast
+// is pinned here rather than left to drift.
+console.log('\n11. research sends no output cap, and web_search still does')
+{
+  const researchCalls = stubFetch(() => agentOk('deep answer'))
+  await makeTool(baseConfig).tool.execute({ question: 'q', depth: 'high' }, exec)
+  check('the research body sends no max_output_tokens',
+    researchCalls[0]?.body?.max_output_tokens === undefined,
+    JSON.stringify(researchCalls[0]?.body))
+  check('and still names the preset and the search tool',
+    researchCalls[0]?.body?.preset === 'high' && researchCalls[0]?.body?.tools?.[0]?.type === 'web_search',
+    JSON.stringify({ preset: researchCalls[0]?.body?.preset, tools: researchCalls[0]?.body?.tools }))
+  check('omitting the cap did not change anything else about the body',
+    researchCalls[0]?.body?.input === 'q'
+      && researchCalls[0]?.url === 'https://api.perplexity.ai/v1/agent'
+      && researchCalls[0]?.body?.background === true,
+    JSON.stringify(researchCalls[0]?.body))
+
+  const searchCalls = stubFetch(() => agentOk('short answer'))
+  const search = makeTool(baseConfig)
+  const provider = search.providers.find((candidate) => candidate.id === 'perplexity')
+  await provider.search({ query: 'q' }, exec.signal)
+  check('the web_search body still carries the configured cap',
+    searchCalls[0]?.body?.max_output_tokens === baseConfig.maxTokens,
+    JSON.stringify(searchCalls[0]?.body))
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)

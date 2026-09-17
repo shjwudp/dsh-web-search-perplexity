@@ -16,7 +16,7 @@
  * visible rather than implied.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -166,6 +166,10 @@ const imageDir = mkdtempSync(join(tmpdir(), 'pplx-image-'))
 const pngPath = join(imageDir, 'shot.png')
 const gifPath = join(imageDir, 'anim.gif')
 const extensionlessPath = join(imageDir, 'attachment-object')
+// A dotted DIRECTORY name, to prove the extension is read from the file name and
+// not from a dot anywhere in the path.
+const dottedDir = join(imageDir, 'shots.v2')
+const dottedExtensionlessPath = join(dottedDir, 'attachment-object')
 const textAsPngPath = join(imageDir, 'notes.png')
 const bigPath = join(imageDir, 'huge.png')
 const outsideDir = mkdtempSync(join(tmpdir(), 'pplx-outside-'))
@@ -174,6 +178,8 @@ try {
   writeFileSync(pngPath, PNG_1X1)
   writeFileSync(gifPath, GIF_1X1)
   writeFileSync(extensionlessPath, PNG_1X1)
+  mkdirSync(dottedDir, { recursive: true })
+  writeFileSync(dottedExtensionlessPath, PNG_1X1)
   writeFileSync(textAsPngPath, 'this is not a raster image\n')
   writeFileSync(bigPath, Buffer.concat([PNG_1X1, Buffer.alloc(4096)]))
   writeFileSync(outsidePath, PNG_1X1)
@@ -289,6 +295,17 @@ try {
       signaturePart?.type === 'input_image'
         && String(signaturePart?.image_url).startsWith('data:image/png;base64,'),
       JSON.stringify(signaturePart)?.slice(0, 80))
+
+    // The extension belongs to the file NAME. Reading it from the whole path let
+    // a dot in a directory name stand in for one, so this path looked like it had
+    // the extension `.v2\attachment-object` and was sent as ordinary text.
+    const dottedCalls = stubFetch(() => agentOk('dotted answer'))
+    await makeProvider(baseConfig).search({ query: dottedExtensionlessPath, maxResults: 5 })
+    const dottedPart = dottedCalls[0]?.body?.input?.[0]?.content?.[1]
+    check('an extensionless image under a dotted directory is still an image',
+      dottedPart?.type === 'input_image'
+        && String(dottedPart?.image_url).startsWith('data:image/png;base64,'),
+      JSON.stringify(dottedPart)?.slice(0, 80))
   }
 
   // ── 5. A mismatched extension is refused loudly, not sent as text ────────────

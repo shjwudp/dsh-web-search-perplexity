@@ -48,7 +48,7 @@
  */
 
 import { readFile, stat } from 'node:fs/promises'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { basename, isAbsolute, relative, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { WebError } from '@deepseek-ai/dsh-web'
 import { PERPLEXITY_RESEARCH_SKILL } from './skill.js'
@@ -73,6 +73,7 @@ export {
   formatResearchOutput,
   parseResearchArgs,
   presentResearchCall,
+  researchDepth,
   researchTimeoutMs,
 } from './research.js'
 
@@ -285,6 +286,10 @@ const Config = z.object({
   // This is the tool's reason to exist, not a second deadline for search: a
   // quick search is bounded by `softTimeoutMs`, a research call by this.
   researchTimeoutMs: z.number().step(1).min(0).default(DEFAULT_RESEARCH_TIMEOUT_MS),
+  // Default `depth` for a research call that names none. Blank keeps the built-in
+  // default (`low`); an unknown value is ignored rather than breaking the tool, so
+  // a typo cannot make research unavailable. Read per call, not at registration.
+  researchDepth: z.string().default(''),
 })
 
 /** Map one structured Perplexity search result into a normalized source. */
@@ -327,16 +332,24 @@ function mapAgentResponse(data) {
       for (const content of item.contents ?? []) pushSource(content)
     }
   }
+  // `incomplete` is the API's own truncation status, so it becomes both a line
+  // the model can read and the machine-readable field. The field is the part that
+  // matters: it is one of the three fields `dsh-tool-web` forwards, and a result
+  // that prints "Truncated" while reporting `truncated: false` contradicts itself
+  // exactly when a reader needs it to be right.
+  const truncated = data.status === 'incomplete'
   const joined = texts.join('\n\n')
   const content = joined.length > 0
-    ? joined + (data.status === 'incomplete'
-      ? '\n\n(Truncated: the response reached max output tokens. Increase maxTokens for a complete answer.)'
+    ? joined + (truncated
+      // Deliberately does not name `maxTokens` as the remedy: `perplexity_research`
+      // leaves the output budget to the preset, so that advice would be wrong there.
+      ? '\n\n(Truncated: the response ended before it finished — its output budget was exhausted.)'
       : '')
     : ''
   return {
     ...(content.length > 0 ? { content } : {}),
     sources,
-    truncated: false,
+    truncated,
   }
 }
 
@@ -396,7 +409,13 @@ async function readLocalImageQuery(path, options) {
     return { kind: 'text' }
   }
   if (!stats.isFile()) return { kind: 'text' }
-  const extension = resolvedPath.slice(resolvedPath.lastIndexOf('.')).toLowerCase()
+  // The extension is read from the file NAME, not from the whole path:
+  // `lastIndexOf('.')` on a path finds a dot in a directory name, so an
+  // extensionless image under `C:\shots.v2\` would carry the "extension"
+  // `.v2\photo` and be sent as an ordinary text query.
+  const fileName = basename(resolvedPath)
+  const dot = fileName.lastIndexOf('.')
+  const extension = dot > 0 ? fileName.slice(dot).toLowerCase() : ''
   let claimed = IMAGE_MEDIA_TYPE_BY_EXTENSION[extension]
   if (claimed === undefined) {
     // No extension at all can still be an image (normalized attachment objects
@@ -602,12 +621,31 @@ function resolveOptions(ctx, config) {
   }
 }
 
-/** Build the Agent API request body for one preset. */
-function agentRequestBody(request, options, preset) {
+/**
+ * Build the Agent API request body for one preset.
+ *
+ * `applyMaxTokens` exists for one measured reason: a preset brings its own output
+ * budget (128000 for `medium`/`high`), and overriding it with the shared
+ * `maxTokens` (2048 live) starves a multi-step research run. Measured against the
+ * live API on 2026-09-16, on the very questions whose runs failed: with the cap, a
+ * `high` run ended with **zero** answer messages — reproduced as both
+ * `incomplete` (documented as truncation) and
+ * `failed` + `model_error … (reasoning_only)`, the exact incident signature —
+ * while the same questions uncapped answered fully (8 343–11 054 output tokens,
+ * 2 096–2 718 of them reasoning). So research omits the field and lets the preset
+ * size its own budget. See `docs/model-stage-no-output.md` §3.1.
+ *
+ * @param request - the search request, for its query.
+ * @param options - resolved provider options.
+ * @param preset - the Agent preset to send, or `''` for the model-only shape.
+ * @param settings - `applyMaxTokens: false` leaves the output budget to the preset.
+ * @returns the Agent API request body.
+ */
+function agentRequestBody(request, options, preset, { applyMaxTokens = true } = {}) {
   const body = {
     input: request.query,
     tools: [webSearchTool(options)],
-    ...(Number.isInteger(options.maxTokens) && options.maxTokens > 0
+    ...(applyMaxTokens && Number.isInteger(options.maxTokens) && options.maxTokens > 0
       ? { max_output_tokens: options.maxTokens }
       : {}),
   }
@@ -634,14 +672,15 @@ function agentRequestBody(request, options, preset) {
  * @param body - the image message array.
  * @param options - resolved provider options.
  * @param preset - the preset the caller would otherwise send.
+ * @param settings - `applyMaxTokens: false` leaves the output budget to the preset.
  * @returns the complete Agent API request body.
  */
-function agentImageRequestBody(body, options, preset) {
+function agentImageRequestBody(body, options, preset, { applyMaxTokens = true } = {}) {
   return {
     ...body,
     tools: [webSearchTool(options)],
     ...(preset !== '' ? { preset } : { model: options.model }),
-    ...(Number.isInteger(options.maxTokens) && options.maxTokens > 0
+    ...(applyMaxTokens && Number.isInteger(options.maxTokens) && options.maxTokens > 0
       ? { max_output_tokens: options.maxTokens }
       : {}),
   }
@@ -755,7 +794,6 @@ export function apply(ctx, config = {}) {
     agentRequestBody,
     agentImageRequestBody,
     buildImageRequest,
-    degradationStatus,
     mapAgentResponse,
     resolveApiKey,
     resolveOptions,

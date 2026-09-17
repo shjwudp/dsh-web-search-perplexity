@@ -196,5 +196,65 @@ console.log('\n4. a successful save still behaves')
   check('the saving flag was cleared', controller.projection().saving === false)
 }
 
+// ── 5. The research settings are card fields, and clearing unsets them ────────
+// Before this the card had no research control at all: `researchDepth` and
+// `researchTimeoutMs` could only be written by hand in settings.yaml, so a user
+// could not see or change the default research cost from the UI. These pin that
+// both are projected, that a chosen value is written as the host expects (the
+// budget as a number, not the string the input holds), and that clearing the
+// field *unsets* the key — blank means "use the built-in default", so storing an
+// empty string would be a different thing.
+console.log('\n5. the research settings round-trip through the card')
+{
+  const controller = makeController()
+  const projected = controller.projection()
+  check('both research fields are projected into the card',
+    projected.researchDepth !== undefined && projected.researchTimeoutMs !== undefined,
+    JSON.stringify(Object.keys(projected).filter((key) => key.startsWith('research'))))
+  check('an unset depth and budget read as blank',
+    projected.researchDepth.text === '' && projected.researchTimeoutMs.text === '',
+    `${projected.researchDepth.text}/${projected.researchTimeoutMs.text}`)
+  check('the depth control offers every depth plus the built-in default',
+    projected.researchDepth !== undefined && typeof controller.specs.get('researchDepth')?.parse === 'function',
+    JSON.stringify([...controller.specs.keys()].filter((key) => key.startsWith('research'))))
+
+  const written = []
+  const unsets = []
+  const baseSet = controller.scope.set.bind(controller.scope)
+  const baseUnset = controller.scope.unset.bind(controller.scope)
+  controller.scope.set = async (field, value) => { written.push([field, value]); return baseSet(field, value) }
+  controller.scope.unset = async (field) => { unsets.push(field); return baseUnset(field) }
+
+  controller.actions().edit('researchDepth', 'high')
+  controller.actions().edit('researchTimeoutMs', '600000')
+  await controller.actions().save()
+  check('the chosen depth reaches the host as a string',
+    written.some(([field, value]) => field === 'researchDepth' && value === 'high'), JSON.stringify(written))
+  check('the chosen budget reaches the host as a number, not the input text',
+    written.some(([field, value]) => field === 'researchTimeoutMs' && value === 600_000),
+    JSON.stringify(written))
+  check('the card is clean after saving', controller.projection().dirty === false)
+
+  // 0 is meaningful for the budget — it declares no deadline — so it must be a
+  // set, not a clear, and must survive the round trip.
+  controller.actions().edit('researchTimeoutMs', '0')
+  await controller.actions().save()
+  check('0 declares no deadline rather than clearing the field',
+    written.some(([field, value]) => field === 'researchTimeoutMs' && value === 0)
+      && !unsets.includes('researchTimeoutMs'),
+    `written=${JSON.stringify(written)} unsets=${JSON.stringify(unsets)}`)
+
+  // Clearing returns the field to the built-in default, which is an unset.
+  controller.actions().edit('researchDepth', '')
+  await controller.actions().save()
+  check('clearing the depth unsets it instead of storing an empty value',
+    unsets.includes('researchDepth'), JSON.stringify(unsets))
+
+  // A value outside the enum must be refused rather than sent to the host.
+  controller.actions().edit('researchDepth', 'unlimited')
+  check('an unknown depth is invalid, so Save is blocked',
+    controller.projection().invalid === true, String(controller.projection().invalid))
+}
+
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)
 process.exit(failures === 0 ? 0 : 1)
