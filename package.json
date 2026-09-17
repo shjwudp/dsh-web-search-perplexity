@@ -34,6 +34,7 @@
     "check": "node --check src/index.js && node --check src/client.js && node --check src/skill.js && node --check src/shared.js && node --check src/search-api.js && node --check src/research.js && node --check src/agent-run.js",
     "test": "node test/package-metadata.test.mjs && node test/soft-deadline.test.mjs && node test/image-input.test.mjs && node test/search-api.test.mjs && node test/research.test.mjs && node test/agent-model-failure.test.mjs && node test/transport-diagnostics.test.mjs && node test/rate-limit-diagnostics.test.mjs && node test/client-locale.test.mjs && node test/client-save.test.mjs",
     "build:skill": "node scripts/build-skill.mjs",
+    "build:diagram": "node scripts/build-diagram.mjs",
     "sync:profile": "node scripts/sync-profile.mjs",
     "prepack": "npm run build:skill"
   },

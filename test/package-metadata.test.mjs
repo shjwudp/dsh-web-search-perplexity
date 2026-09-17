@@ -24,6 +24,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { USER_AGENT } from '../src/shared.js'
+import { DARK_PATH, LIGHT_PATH, SOURCE_PATH, darkVariant, lightVariant } from '../scripts/build-diagram.mjs'
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 const manifest = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
@@ -78,8 +79,16 @@ console.log('\n3. every relative documentation link points at a file that exists
   let checked = 0
   for (const file of docFiles) {
     const text = readFileSync(join(repoRoot, file), 'utf8')
-    for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) {
-      const target = match[1]
+    const targets = []
+    for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) targets.push(match[1])
+    // The README's hero image is a <picture>, not a markdown image, so its src and
+    // srcset are relative references too and deserve the same check. A srcset may
+    // carry several candidates; each is its own reference.
+    for (const match of text.matchAll(/\b(?:src|srcset)="([^"]+)"/g)) {
+      for (const candidate of match[1].split(',')) targets.push(candidate.trim().split(/\s+/)[0])
+    }
+    for (const target of targets) {
+      if (target === undefined || target === '') continue
       // Absolute URLs and in-page anchors have nothing to resolve on disk.
       if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith('#')) continue
       const path = target.split('#')[0]
@@ -95,6 +104,30 @@ console.log('\n3. every relative documentation link points at a file that exists
   // Printed rather than only asserted: a guard that scanned nothing would pass the
   // check above, so the count is what shows this one is doing work.
   console.log(`        (checked ${checked} relative links across ${docFiles.length} files)`)
+}
+
+// ── 4. The generated diagram variants match their source ───────────────────
+// `docs/architecture.svg` is the only diagram a human edits; the light and dark
+// files the README's <picture> loads are generated from it. Editing a generated
+// file by hand would leave the two palettes describing different diagrams, and
+// nothing else in the build would notice.
+console.log('\n4. the light and dark diagrams are current')
+{
+  const source = readFileSync(SOURCE_PATH, 'utf8')
+  check('the authored diagram still carries a dark palette',
+    source.includes('prefers-color-scheme: dark'))
+  for (const [label, path, produce] of [
+    ['light', LIGHT_PATH, lightVariant],
+    ['dark', DARK_PATH, darkVariant],
+  ]) {
+    const generated = existsSync(path) ? readFileSync(path, 'utf8') : undefined
+    check(`the ${label} variant exists`, generated !== undefined, path)
+    check(`the ${label} variant matches the authored source`,
+      generated === produce(source),
+      generated === undefined ? 'missing' : 'differs — run npm run build:diagram')
+    check(`the ${label} variant carries no media query`,
+      generated !== undefined && !generated.includes('prefers-color-scheme'))
+  }
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)

@@ -46,34 +46,6 @@
     .mark { stroke: #7c8aa0; stroke-width: 1.6; fill: none }
     .markah { fill: #7c8aa0 }
 
-    @media (prefers-color-scheme: dark) {
-      .bg { fill: #0f1318 }
-      .band { fill: #161b22; stroke: #2c3542 }
-      .l1 { fill: #141c2b; stroke: #2c3a55 }
-      .l1t { fill: #7fa9f0 }
-      .l1line { stroke: #6ea0f0 }
-      .l1ah { fill: #6ea0f0 }
-      .l2 { fill: #241d12; stroke: #4a3a22 }
-      .l2t { fill: #e0a041 }
-      .l2line { stroke: #e0a041 }
-      .l2ah { fill: #e0a041 }
-      .shared { fill: #1b2129; stroke: #2f3946 }
-      .panel { fill: #1b2129; stroke: #2f3946 }
-      .dash { fill: #171b21; stroke: #333b46 }
-      .t { fill: #e8edf4 }
-      .pt { fill: #dbe3ee }
-      .b { fill: #a9b6c7 }
-      .m { fill: #c2cddd }
-      .mut { fill: #8b98aa }
-      .chipT { fill: #dbe3ee }
-      .chipS { fill: #8b98aa }
-      .dotUsed { fill: #6ea0f0 }
-      .mark { stroke: #8b98aa }
-      .markah { fill: #8b98aa }
-      .l1bar { fill: #6ea0f0 }
-      .l2bar { fill: #e0a041 }
-      .barPlugin { fill: #8b98aa }
-    }
   </style>
 
   <defs>

@@ -46,7 +46,6 @@
     .mark { stroke: #7c8aa0; stroke-width: 1.6; fill: none }
     .markah { fill: #7c8aa0 }
 
-    @media (prefers-color-scheme: dark) {
       .bg { fill: #0f1318 }
       .band { fill: #161b22; stroke: #2c3542 }
       .l1 { fill: #141c2b; stroke: #2c3a55 }
@@ -73,7 +72,6 @@
       .l1bar { fill: #6ea0f0 }
       .l2bar { fill: #e0a041 }
       .barPlugin { fill: #8b98aa }
-    }
   </style>
 
   <defs>

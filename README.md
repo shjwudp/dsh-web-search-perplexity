@@ -5,19 +5,34 @@ a DSH agent quick web lookups, and a second tool for research that takes minutes
 
 ## What it does
 
-![How this plugin fits into DSH and Perplexity](docs/architecture.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/architecture-light.svg">
+  <img alt="Three layers — the DSH host, this plugin, and the Perplexity API — crossed by two capability lanes. In the web search lane the host's own web_search tool is answered by a provider this plugin registers into the ctx.web seam, which calls Perplexity's Agent API by default or its Search API when selected. In the research lane the plugin adds a perplexity_research tool with its own 30-minute budget, and a skill that is guidance for the model rather than a call; that lane reaches Perplexity through the Agent API only. Perplexity publishes four APIs, of which Router and Embeddings are outside this plugin's scope." src="docs/architecture-light.svg">
+</picture>
 
-*DSH supplies the agent session, the `ctx.web` seam and the configuration; this
-plugin registers two Perplexity providers into that seam and adds the research tool;
-the Agent and Search APIs are the two of Perplexity's four published surfaces that
-the plugin uses. Open the image for the full-size version.*
+The plugin provides **two capabilities that stay separate**, and it is worth knowing
+which is which before configuring anything.
 
-- **Answers, not just links.** By default searches go to Perplexity's Agent API, which
+**Web search — this plugin is a backend, not a tool.** It registers a Perplexity
+provider into the host's web-search seam. The host's existing `web_search` tool stays
+the tool the model calls; this plugin supplies the provider behind it, so the agent's
+tool list never changes. That tool runs under the host's own budget — 60 s with the
+shipped agent presets.
+
+**Research — the plugin adds a tool, and a skill to guide it.** `perplexity_research`
+is a second tool, contributed here, that declares its own 30-minute budget, because no
+search bounded to 60 s can finish a multi-round question. It ships with the
+`perplexity-research` skill: markdown loaded into the model's context that says when to
+search and when to research, how to read a degraded result, and how to cite sources.
+The skill is guidance, not a call — it never reaches Perplexity itself.
+
+- **Answers, not just links.** Searches go to Perplexity's Agent API by default, which
   returns a synthesized answer with its sources, mapped into the seam's normalized
-  result — so the harness's own `web_search` keeps working exactly as before.
-- **A tool for questions that need minutes.** `perplexity_research` carries its own
-  30-minute budget, so a question that would blow `web_search`'s 60 s ceiling comes back
-  as an answer instead of a timeout.
+  result.
+- **A second backend when you want raw hits.** Set `searchProvider` and the same
+  `web_search` tool is served by Perplexity's Search API instead: ranked results with
+  domain, language, country, date, and recency filters.
 - **Images work.** A query naming a local image file or a public image URL is sent to
   Perplexity as an image, so "what is wrong with this board" is a supported question.
 - **Failures say what happened.** A rate limit, a connection failure, and a backend that
@@ -64,6 +79,34 @@ export PERPLEXITY_API_KEY="pplx-..."
 
 Never put the key in a patch file. Restart DSH, and the agent has both tools.
 
+## Common settings
+
+A quick-start subset. The full 23-key reference, the settings card, and how to switch
+backends are in [configuration](docs/configuration.md).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `apiKey` | unset | Perplexity API key; normally saved in the UI instead |
+| `preset` | unset | Agent preset: `fast`, `low`, `medium`, `high`, `xhigh`, `wide-research` |
+| `searchProvider` | `''` | Blank or `perplexity` = Agent API; `perplexity-search` = Search API |
+| `researchDepth` | `low` | Default depth for `perplexity_research` |
+| `softTimeoutMs` | derived from `preset` | Deadline before one degraded retry; `0` disables it |
+| `imageInput` | enabled | Set to `off` to send image paths as ordinary text |
+
+## Use it
+
+The model chooses the tool; nothing is configured per call.
+
+- Quick, single-fact lookups go through `web_search`, answered by whichever backend
+  `searchProvider` selects.
+- A question that needs many sources, or several rounds of reading, goes to
+  `perplexity_research` with an optional depth — `low` (the default), `medium`, `high`,
+  or `wide`:
+
+  ```js
+  perplexity_research({ question: 'Which EU AI Act obligations apply to GPAI providers from 2026?', depth: 'medium' })
+  ```
+
 ## Compatibility
 
 - Needs a DSH profile with the `ctx.web` seam mounted. The plugin injects `web`,
@@ -82,46 +125,49 @@ Never put the key in a patch file. Restart DSH, and the agent has both tools.
   stays supported until 2026-09-27), so there is no `apiMode` switch and no Sonar
   fallback.
 
-## The settings worth knowing
-
-| Key | Default | Meaning |
-|---|---|---|
-| `apiKey` | unset | Perplexity API key; normally saved in the UI instead |
-| `preset` | unset | Agent preset: `fast`, `low`, `medium`, `high`, `xhigh`, `wide-research` |
-| `searchProvider` | `''` | Blank or `perplexity` = Agent API; `perplexity-search` = Search API |
-| `researchDepth` | `low` | Default depth for `perplexity_research` |
-| `softTimeoutMs` | derived from `preset` | Deadline before one degraded retry; `0` disables it |
-| `imageInput` | enabled | Set to `off` to send image paths as ordinary text |
-
-Everything else — the full 23-key table, the API key resolution order, the settings
-card layout, and how to switch backends — is in
-[configuration](docs/configuration.md).
-
 ## Documentation
 
-| | |
-|---|---|
-| [configuration](docs/configuration.md) | Every setting, the settings card, and choosing between the two Perplexity backends |
-| [tools](docs/tools.md) | `web_search` vs `perplexity_research`, depths, the background lifecycle, response mapping |
-| [timeouts](docs/timeouts.md) | Tool budgets, measured latency, the derived soft deadline, and degradation markers |
-| [images](docs/images.md) | Sending an image, the three read guards, and what it costs |
-| [failures](docs/failures.md) | How rate limits, connection failures, and a no-output research run each report themselves |
-| [development](docs/development.md) | Tests, `sync:profile`, localization, and the skill's two copies |
-| [model-stage-no-output](docs/model-stage-no-output.md) | The incident that shaped the research path: evidence and the A/B that found the output cap |
-| [upstream-report-model-no-output](docs/upstream-report-model-no-output.md) | The report sent upstream, with reproducible run ids |
+**Install and configure**
+
+- [Configuration](docs/configuration.md) — every setting, the settings card, and how to
+  choose between the two Perplexity backends
+- [Development](docs/development.md) — the test suites, `sync:profile`, localization,
+  and the two places the skill can live
+
+**Understand the behavior**
+
+- [The two tools](docs/tools.md) — `web_search` vs `perplexity_research`, the depth
+  ladder, the background lifecycle, and the response mapping
+- [Timeouts and degradation](docs/timeouts.md) — the tool budget, measured latency, the
+  derived soft deadline, and the machine-readable degradation markers
+- [Image input](docs/images.md) — sending an image, the three read guards, and what it
+  costs
+- [Failures](docs/failures.md) — how a rate limit, a connection failure, and a
+  no-output research run each report themselves
+
+**Why it works this way**
+
+- [Model-stage incident](docs/model-stage-no-output.md) — the evidence, and the A/B that
+  found the output cap starving a research run
+- [Upstream report](docs/upstream-report-model-no-output.md) — the report sent to
+  Perplexity, with reproducible run ids
+
+The diagram is an SVG with an editable source in the same directory: the authored
+`docs/architecture.svg` carries both palettes, and
+`npm run build:diagram` derives `architecture-light.svg` and `architecture-dark.svg`
+from it, which is what the `<picture>` above loads.
 
 ## Development
 
 ```bash
-npm run check        # syntax-check the host, client, and generated skill module
-npm test             # ten suites, all offline, no API quota
-npm run build:skill  # regenerate src/skill.js from the markdown skill source
-npm run sync:profile # copy this working tree into every DSH profile that depends on it
+npm run check          # syntax-check the host, client, and generated skill module
+npm test               # ten suites, all offline, no API quota
+npm run build:skill    # regenerate src/skill.js from the markdown skill source
+npm run build:diagram  # regenerate the light and dark architecture SVGs
+npm run sync:profile   # copy this working tree into every DSH profile that depends on it
 ```
 
-See [development](docs/development.md) for what each suite covers, why `sync:profile`
-is needed at all, and the two places the skill can live.
+## Help
 
-## License
-
-MIT
+Open an [issue](https://github.com/shjwudp/dsh-web-search-perplexity/issues) for a bug
+or a question. Licensed under MIT.

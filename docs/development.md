@@ -1,10 +1,11 @@
 # Development
 
 ```bash
-npm run check        # syntax-check the host, client, and generated skill module
-npm test             # offline host tests, then the settings card's suites
-npm run build:skill  # regenerate src/skill.js from the markdown skill source
-npm run sync:profile # copy this working tree into every DSH profile that depends on it
+npm run check          # syntax-check the host, client, and generated skill module
+npm test               # offline host tests, then the settings card's suites
+npm run build:skill    # regenerate src/skill.js from the markdown skill source
+npm run build:diagram  # regenerate the light and dark architecture SVGs
+npm run sync:profile   # copy this working tree into every DSH profile that depends on it
 ```
 
 `npm test` runs ten suites, all offline: every one stubs `globalThis.fetch` (or the
@@ -18,8 +19,9 @@ browser half's module loader) and none consumes API quota.
   the model-stage no-output failure class and its separation from the 429 and
   connection-failure paths.
 - `test/package-metadata.test.mjs` pins `USER_AGENT` and the README's install tag to
-  `package.json`, and checks that every relative link in the docs resolves. Both had
-  drifted before and nothing caught it.
+  `package.json`, checks that every relative link and image reference in the docs
+  resolves, and regenerates the two diagram variants to prove they are current. Each of
+  those had drifted in practice before anything caught it.
 - `test/client-locale.test.mjs` stubs `window.__ModuleLoader__` and drives the real
   browser half, checking that the `zh`/`en` dictionaries stay complete and that
   `apply` registers them.
