@@ -141,9 +141,12 @@ export function maxResultsFor(searchType) {
 /**
  * The content budget for one search, as request fields.
  *
- * `search_context_size` applies to web search only: the endpoint rejects a
- * people search that carries it (`Invalid request`, HTTP 400), while a web
- * search accepts it. Sending it unconditionally would break every people search.
+ * `search_context_size` applies to web search only. Sending it unconditionally
+ * would break every people search: measured against the live endpoint, a people
+ * search that carries it is rejected. That rejection is this project's own
+ * observation — the current published schema does not forbid the combination and
+ * does not document the status code, so the omission is a precaution rather than
+ * a documented requirement.
  *
  * @param options - resolved Search API options.
  * @returns either the context-size field or an empty object.
@@ -240,7 +243,8 @@ function boundedDeadline(outerSignal, ms) {
 /** Abort reason marking this provider's own deadline. */
 const DEADLINE_REASON = 'PERPLEXITY_SEARCH_API_DEADLINE'
 
-/** The Search API-backed provider; HTTP redirects fail as `WEB_PROVIDER_ERROR`. */export class PerplexitySearchApiProvider {
+/** The Search API-backed provider; HTTP redirects fail as `WEB_PROVIDER_ERROR`. */
+export class PerplexitySearchApiProvider {
   /**
    * @param ctx - plugin context, used to resolve the API key.
    * @param configSource - returns the current settings section, so a change made

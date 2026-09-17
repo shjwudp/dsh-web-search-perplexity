@@ -21,7 +21,7 @@ dependencies.
 
 ## Compatibility
 
-- Tested with **DSH 0.1.5-rc.2** (`@deepseek-ai/dsh-web` 0.1.5-rc.2,
+- Tested with **DSH 0.1.5-rc.1** (`@deepseek-ai/dsh-web` 0.1.5-rc.2,
   `@deepseek-ai/schemastery` 3.18.2). The host version numbers below are DSH's,
   not this plugin's; this package's own versions are the `v*` tags.
 - Peer dependencies: `@deepseek-ai/dsh-tools: ^0.1.2-rc.1`,
@@ -50,7 +50,7 @@ dependencies.
 ## Install
 
 ```bash
-dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.6-rc.1
+dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.7-rc.1
 ```
 
 Then tell the web seam to use the Perplexity provider in
@@ -123,8 +123,11 @@ call when more than one registered provider is usable.
   what the endpoint accepts for the configured `searchType` (20 for web, 50 for
   people). The seam still truncates on the way back.
 - **`search_context_size` is web-only.** A people search that carries it is
-  rejected with `Invalid request`, so the backend omits it for `searchType:
-  people`.
+  rejected against the live endpoint, so the backend omits it for `searchType:
+  people`. That rejection is our own observation rather than a documented rule:
+  the published schema does not forbid the combination, and the only validation
+  code it documents for `/search` is `422`, not `400`. Omitting the field is a
+  precaution, and `searchType: people` loses nothing by it.
 - **Invalid filters are dropped, not sent.** A malformed country code, language
   code, or date is omitted rather than forwarded, because the endpoint answers a
   bad filter with `422`. Dates must be `MM/DD/YYYY`; domains are capped at 20 and
@@ -151,26 +154,27 @@ node C:\path\to\repo\scripts\live-search-api-check.mjs "your query"
 | `preset` | unset | Dynamic preset `fast`, `low`, `medium`, `high`, `xhigh`, or `wide-research`. When set, Perplexity picks the model; `model` is only sent as an override if it is a `provider/model` slug. |
 | `baseURL` | `https://api.perplexity.ai` | Endpoint base; `/v1/agent` is appended |
 | `model` | `openai/gpt-5.6-luna` | Agent API model id (`provider/model`, e.g. `openai/gpt-5.6-sol`). Used when no preset is set; a value without `/` falls back to the default |
-| `maxTokens` | `1024` | `max_output_tokens` for the generated answer |
+| `maxTokens` | `1024` | `max_output_tokens` for `web_search` answers; `perplexity_research` leaves the output budget to the preset (see [Long research](#long-research-the-perplexity_research-tool)) |
 | `searchRecency` | unset | Recency window for the search tool's filter: `day`, `week`, `month`, or `year`. Unset sends no filter |
-| `softTimeoutMs` | per preset, or 40 s for the Search API | One deadline for both backends. On the Agent API it bounds one search before one degraded retry; on the Search API it bounds the request. `0` disables it. Unset = derived from the configured `preset` (`fast`/`low` `12000`; `medium`/`high`/`xhigh`/`wide-research`/unset `40000`). `0` disables it. Keep `softTimeoutMs` + 15 s below the tool budget. |
+| `softTimeoutMs` | per preset, or 40 s for the Search API | One deadline for both backends. On the Agent API it bounds one search before one degraded retry; on the Search API it bounds the request. `0` disables it. Unset = derived from the configured `preset` (`fast`/`low` `12000`; `medium`/`high`/`xhigh`/`wide-research`/unset `40000`). Keep `softTimeoutMs` + 15 s below the tool budget. |
 | `fallbackPreset` | `fast` | Preset used for the single degraded retry (any preset except `wide-research`) |
 | `imageInput` | enabled | Image input. Only the literal `off`/`false`/`0` disables it |
 | `imageMaxBytes` | `10485760` | Per-image byte ceiling for a local image; an oversized image is refused before it is read |
 | `imageRoots` | `[]` (no restriction) | Directory allowlist for local image reads; a path outside every entry is refused |
-| `researchTimeoutMs` | `600000` | Budget for one `perplexity_research` call, independent of `tool-web`'s search budget. `0` declares no deadline. Read once when the tool registers, so a change takes effect on the next DSH start |
+| `researchTimeoutMs` | `1800000` | Budget for one `perplexity_research` call, independent of `tool-web`'s search budget. `0` declares no deadline. Read once when the tool registers, so a change takes effect on the next DSH start |
+| `researchDepth` | `low` | Default `depth` for a research call that names none: `low`, `medium`, `high` or `wide`. An unknown value falls back to `low`. Read on every call, so a change applies to the next research call. Also editable in the plugin card's `Advanced settings` |
 | `searchProvider` | `''` (Agent API) | Which backend serves searches: blank or `perplexity` = Agent API; `perplexity-search` = Search API. Only the selected one is usable |
 | `searchType` | `web` | Search API only: `web` or `people`. `people` also raises the result bound to 50 |
 | `searchDomains` | `[]` | Search API only: up to 20 domains or URLs to restrict results to |
 | `searchLanguages` | `[]` | Search API only: up to 20 two-letter ISO 639-1 codes; sent lowercased |
 | `searchCountry` | unset | Search API only: two-letter ISO 3166-1 code, sent uppercased |
-| `searchContextSize` | `medium` | Search API only: `low`, `medium`, or `high` — how much page content each result returns. Omitted for `searchType: people`, which rejects it |
+| `searchContextSize` | `medium` | Search API only: `low`, `medium`, or `high` — how much page content each result returns. Omitted for `searchType: people`, which our live runs show rejects it (see the note under the table) |
 | `searchMaxTokensPerPage` | unset | Search API only: explicit per-page content budget (`max_tokens_per_page`) |
 | `searchAfterDate` / `searchBeforeDate` | unset | Search API only: publication-date window as `MM/DD/YYYY` |
 
-> **Only the Agent API and the Search API are used.** Perplexity deprecated its
-> Sonar Chat Completions API (supported only until **2026-09-27**) in favor of the
-> Agent API, so this plugin has no `apiMode` switch. `searchRecency` works on both
+> **Only the Agent API and the Search API are used.** Perplexity has replaced its
+> Sonar Chat Completions API with the Agent API; Sonar stays supported until
+> **2026-09-27**, so this plugin has no `apiMode` switch. `searchRecency` works on both
 > backends: on the Agent API the window belongs to the `web_search` tool and is
 > sent as `tools[].filters.search_recency_filter` (`day`/`week`/`month`/`year`);
 > on the Search API it is a top-level field and additionally accepts `hour`.
@@ -272,28 +276,73 @@ tool that carries its own budget and never runs through `tool-web`'s.
 
 | | `web_search` | `perplexity_research` |
 |---|---|---|
-| Budget | `tool-web.searchTimeoutMs` (60 s shipped) | `researchTimeoutMs` (default 600000, i.e. 10 minutes) |
+| Budget | `tool-web.searchTimeoutMs` (60 s shipped) | `researchTimeoutMs` (default 1800000, i.e. 30 minutes) |
 | Input | 1–4 queries | one focused question, plus a depth |
 | Preset | the configured one | chosen by `depth` |
+| Output budget | `maxTokens` (`max_output_tokens`) | the preset's own (128000 for `medium`/`high`); `maxTokens` does **not** apply |
 | Backend | Agent or Search API | Agent API only |
 | Use it for | quick facts, several lookups | one question needing many sources or many rounds |
 
-`depth` selects the Agent preset: `medium` (multi-hop browsing, the default),
-`high` (exhaustive coverage), or `wide` (`wide-research`). The default is
-`medium` on purpose: it is the deepest preset whose measured latency (~25 s
-narrow) still fits a synchronous call, whereas `wide-research` is a minutes-long
-collection workflow and has to be asked for. Ask for `wide` when the answer needs
-a large evidence-backed collection.
+`maxTokens` is deliberately not applied to research. A preset is sized for its
+job, and overriding that budget with the shared cap starves a multi-step run:
+measured 2026-09-16 against the live API, on the very questions whose runs had
+failed, a 2048-token cap made a `high` research run end with **no answer at
+all** — once as `incomplete` (documented as truncation) and once as `failed` +
+`model_error … (reasoning_only)`, the incident's exact error — while the same
+question with the budget left to the preset answered fully (8 343–11 054 output
+tokens, 2 096–2 718 of them reasoning). This is our own measurement rather than
+documented API behavior: no Perplexity page states that `max_output_tokens` covers
+reasoning tokens, so the mechanism is inferred from these runs, not quoted from the
+docs. Even when the cap did not kill the run it
+cut the answer to roughly a quarter of its length. `web_search` keeps the cap: a
+short answer is that tool's point. The full A/B is in
+`docs/model-stage-no-output.md` §3.1.
+
+`depth` selects the Agent preset: `low` (light multi-step, **the default**),
+`medium` (multi-hop browsing), `high` (exhaustive coverage), or `wide`
+(`wide-research`). The default is `low` on purpose: a default is what most calls
+get, and depth is not free. Measured against the live API on this plugin's own
+incident questions, an uncapped `high` run took ~5 minutes and spent 8 343–11 054
+output tokens, where `low` answers in seconds. Ask for `medium` when the question
+genuinely needs several rounds, `high` when it is exhaustive, and `wide` when the
+answer needs a large evidence-backed collection. The default can be changed for a
+deployment with the `researchDepth` setting.
 
 The tool is registered through `ctx.tools`, so it is available in every session
 of a profile that mounts this plugin — including sessions composed from an agent
 preset, because the preset's `tool-web` row and this tool's budget are separate
 things. `researchTimeoutMs` is read once, when the tool registers, so changing it
-takes effect on the next DSH start. `0` declares no deadline at all.
+takes effect on the next DSH start; `researchDepth` is read on every call, so
+changing it applies to the next research call. `0` declares no deadline at all.
 
 A long call is still a *synchronous* call: nothing is streamed while it runs. If
 you need unattended research that outlives a turn, that is the Agent API's
 `background` mode and would be a different tool shape (submit, then collect).
+
+### The background lifecycle
+
+Every agent-backed call — `web_search` and `perplexity_research` alike — submits
+with `background: true` and then polls `GET /v1/agent/{id}`. A run is terminal when
+its `status` is `completed`, `failed`, `cancelled`, or `incomplete`; `queued` and
+`in_progress` are the two non-terminal states. Submitting in the background is what
+keeps a minutes-long run from depending on one long-lived connection, which the
+network closes first.
+
+When a deadline expires, the plugin cancels the run it can no longer wait for with
+`POST /v1/agent/{id}/cancel`, and names the id in the error, so a run that was
+already paid for can still be collected with `GET /v1/agent/{id}`.
+
+That cancel call is deliberately best-effort and its failures are swallowed — the
+run may be collectable later by id, and the caller is already receiving the reason
+the call ended early. Two documented responses are therefore worth knowing, because
+a swallowed failure is otherwise invisible:
+
+- cancelling a run that has already reached a terminal status returns `400`, which
+  is expected rather than a fault;
+- an unknown id, or one belonging to another account, returns `404`.
+
+A `200` acknowledges asynchronously with `status: "cancelling"`; the run stops
+shortly after.
 
 ## UI surfaces
 
@@ -309,6 +358,12 @@ you need unattended research that outlives a turn, that is the Agent API's
   `searchDomains`, `searchLanguages`, `searchCountry`, the publication-date
   window, and `searchMaxTokensPerPage` for the Search API.
   The API key is a write-only secret field either way.
+- **Research settings in the card** (`Advanced settings`): `researchDepth` (a
+  select of the built-in default, `low`, `medium`, `high`, `wide`) and
+  `researchTimeoutMs`. They sit outside the backend branch, because the research
+  tool always runs through the Agent API whatever `searchProvider` selects.
+  Clearing `researchDepth` unsets the key, which means "use the built-in
+  default"; `researchTimeoutMs` accepts `0`, which declares no deadline.
 
 ## Timeouts and latency
 
@@ -391,12 +446,60 @@ A degraded answer is marked twice, so no consumer has to read prose:
 Treat a result with `degraded: true` as a shallower source: re-verify material
 claims or re-ask narrowly instead of citing it as full-depth research.
 
+### A run that researched but answered nothing
+
+A failed Agent run can hold every retrieval item and no answer at all. The
+provider reports that as its own failure class rather than as a generic run
+failure, because the three nearby failures call for different next moves:
+
+| failure | how it is reported | what it means |
+|---|---|---|
+| rate limit | `HTTP 429 after N attempts (…) …`, `error.status === 429` | wait, or the quota window is closed |
+| connection failure | `Perplexity search request failed: <cause chain> [POST <url>] (pid=… uptime=… runtime=…)` | the request never arrived |
+| **model stage produced nothing** | `AgentModelNoOutputError`, `failureKind: 'model_no_output'` | the request arrived, the research ran, the backend returned no answer |
+
+The message names the upstream `error.code`, the run id, the preset that was
+asked for, how much retrieval completed, that zero `message` items came back,
+whether anything was billed, and the `GET /v1/agent/{id}` URL that still
+retrieves the run. The same facts are fields on the error: `failureKind`,
+`responseId`, `responseIds`, `attempts`, `errorCode`, `preset`, `billed`,
+`retrievalCompleted`, `messageItems`, `answerChars`, `searchResultBatches`,
+`fetchUrlBatches`, and the inherited `response` snapshot. `error.code` stays
+`WEB_PROVIDER_ERROR` — the seam's routing category is unchanged.
+
+Two axes are deliberately independent: **retry safety** is decided by `usage`
+(an unbilled failure is repeated once; a billed one is reported, never repeated),
+while **classification** is decided by the missing answer, so a billed run with
+no output is still classified and still says it was billed.
+
+`error.code: invalid_request` on such a run is reported verbatim but is *not*
+read as a rejection of the request: the run was accepted and completed its
+retrieval, so the code describes the model stage. Do not "fix" the request body
+for it. A client-side degraded-preset fallback was considered and rejected —
+see the decision, the confirmed/upstream split, and the open questions in
+[`docs/model-stage-no-output.md`](docs/model-stage-no-output.md), with the report
+draft in
+[`docs/upstream-report-model-no-output.md`](docs/upstream-report-model-no-output.md).
+`scripts/probe-run-timeline.mjs` dates a run's failure from the harness's own
+session logs when the API's `created_at` cannot (see that doc's §5).
+
 ## Response mapping
 
-- `content` ← `choices[0].message.content` (the generated answer, unchanged)
-- `sources[]` ← structured `search_results[]` (`url`, `title`, `snippet`,
-  `publishedAt` from `date`)
-- If `search_results` is absent, `sources[]` ← URL-only `citations[]`
+Agent API:
+
+- `content` ← the answer, joined from the `output_text` parts of the `output[]`
+  item whose `type` is `message`
+- `sources[]` ← `search_results[].results[]` plus
+  `fetch_url_results[].contents[]` (`url`, `title`, `snippet`, `publishedAt` from
+  `date`), deduplicated by URL
+- `truncated` ← `true` when the response's `status` is `incomplete`, the API's own
+  truncation signal; the content also carries a line saying so
+
+Search API: `sources[]` ← `results[]`, and there is no generated answer, so
+`content` is only the `[SEARCH]` marker and `truncated` is always `false`.
+
+Neither backend reads a top-level `citations[]` array: that was the Sonar Chat
+Completions shape, which is no longer used.
 
 HTTP redirects are rejected. Failures surface as `WebError` with
 `WEB_PROVIDER_ERROR` (or `WEB_ABORTED` for abort signals).
@@ -410,11 +513,15 @@ npm run build:skill  # regenerate src/skill.js from the markdown skill source
 npm run sync:profile # copy this working tree into every DSH profile that depends on it
 ```
 
-`npm test` runs two suites. `test/soft-deadline.test.mjs` stubs
-`globalThis.fetch`, so it never touches the network; it loads the host module
-from an installed DSH profile by default (the `schemastery` and `dsh-web` peers
-are not installed in a plain checkout), so set `PPLX_PLUGIN_ENTRY` to test a
-different built copy. `test/client-locale.test.mjs` stubs
+`npm test` runs nine suites, all offline: every one stubs `globalThis.fetch`
+(or the browser half's module loader) and none consumes API quota.
+`test/soft-deadline.test.mjs` loads the host module from this checkout when its
+`dsh-web` / `schemastery` peers resolve (a `node_modules` linked to a DSH
+install), and otherwise from an installed DSH profile copy, so set
+`PPLX_PLUGIN_ENTRY` to test a different built copy. `test/agent-model-failure.test.mjs` drives the shared
+Agent runner directly to pin the model-stage no-output failure class and its
+separation from the 429 and connection-failure paths.
+`test/client-locale.test.mjs` stubs
 `window.__ModuleLoader__` and drives the real browser half, checking that the
 `zh`/`en` dictionaries stay complete and that `apply` registers them.
 

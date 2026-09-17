@@ -124,6 +124,34 @@ console.log('\n4. a real connection failure carries a machine-readable code')
   console.log(`        (elapsed: ${elapsed}ms)`)
 }
 
+// ── 4b. A poll failure names GET, because that is what was attempted ────────
+// The same transport serves the background poll, which is a GET. A hardcoded
+// method in the message would misdescribe every poll failure, and polling is
+// precisely where a dropped connection shows up.
+console.log('\n4b. the reported method is the one actually used')
+{
+  let error
+  try {
+    await requestJson(
+      'https://203.0.113.7/v1/agent/resp_probe',
+      'test-key',
+      undefined,
+      AbortSignal.timeout(3000),
+      WebError,
+      'Perplexity search',
+      0,
+      'GET',
+    )
+  } catch (caught) {
+    error = caught
+  }
+  check('a bodyless GET poll is reported as GET',
+    String(error?.message).includes('[GET https://203.0.113.7/v1/agent/resp_probe]'),
+    String(error?.message).slice(0, 200))
+  check('it is not reported as a POST',
+    !String(error?.message).includes('[POST '), String(error?.message).slice(0, 200))
+}
+
 // ── 5. The runtime line reports what only this process can see ─────────────
 // A fetch failure that happens in one process and not another on the same
 // machine is decided by state the process holds, not by the request: the runtime

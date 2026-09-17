@@ -13,6 +13,20 @@
 export const USER_AGENT = 'dsh-web-search-perplexity/0.1.7-rc.1'
 
 /**
+ * Ceiling on a single 429 backoff, in milliseconds, whatever the server's
+ * `Retry-After` asks for.
+ *
+ * Deliberate and reported rather than silent: a real quota window resets on a
+ * minute scale, so waiting it out would pin a tool call for minutes and blow any
+ * latency budget the caller holds. The retry budget is therefore sized to absorb
+ * a short burst, and an exhausted budget is reported as exactly that — see the
+ * note on {@link requestJson}. Raising this number changes how long a
+ * rate-limited call can block, so it is a decision to make with the caller's
+ * budget in hand, not a tuning knob to nudge.
+ */
+export const MAX_RETRY_WAIT_MS = 10_000
+
+/**
  * True when `value` is an HTTPS URL. Only HTTPS is acceptable: every request
  * carries the API key in its Authorization header, so an `http://` base would
  * leak the credential in cleartext.
@@ -277,6 +291,27 @@ export function describeErrorCause(error, depth = 0) {
  * dispatcher would also override Node's own proxy handling, and a broken proxy
  * path is a worse regression than the socket reuse this avoids.
  *
+ * A rejected response is reported on two tracks, because a single prose string
+ * cannot be both actionable and faithful. The message names the machine facts —
+ * the HTTP status, the `Retry-After` the server sent (or its absence), how many
+ * attempts were made of the budget, the elapsed time, and the backoff the
+ * budget allowed — and then preserves the upstream's own sentence verbatim, so
+ * neither part can swallow the other. The same facts are attached to the thrown
+ * error as `status`, `attempts`, `retries`, `elapsedMs`, `retryAfterMs`,
+ * `retryAfterSupplied`, `backoffTotalMs`, `backoffCapMs`, and `clampedBackoffs`.
+ * Message and fields are both needed: the seam and the harness agent loop
+ * forward `message` (`agent-run.js` keeps the last polling error and renders
+ * `lastError.message`), so a field-only diagnostic would never reach the user.
+ *
+ * The retry budget is deliberately small: at most `retries` waits, each capped
+ * at `MAX_RETRY_WAIT_MS` (10s) however large a `Retry-After` the server sends,
+ * so a rate-limited call can still answer inside a tool call's latency budget
+ * instead of pinning it for the minute-scale window a real quota reset usually
+ * has. Exhausting that budget therefore proves only that *this* budget is
+ * spent, and the message says so rather than implying the limit has lifted; a
+ * caller that wants to outlast a longer window keeps that decision and can
+ * retry later.
+ *
  * @param url - absolute endpoint URL.
  * @param apiKey - bearer credential.
  * @param body - request body, or `undefined` for a bodyless request.
@@ -286,10 +321,20 @@ export function describeErrorCause(error, depth = 0) {
  * @param retries - how many times a 429 may be retried.
  * @param method - HTTP method; `POST` unless a caller says otherwise.
  * @returns the parsed response body.
- * @throws when the request fails, is rejected, or its body is unreadable.
+ * @throws when the request fails, is rejected, or its body is unreadable. A
+ * rejection carries the upstream's own sentence *and* this side's facts (status,
+ * attempts, elapsed, backoff budget) in the message, plus the fields listed
+ * above on the error object.
  */
 export async function requestJson(url, apiKey, body, signal, webError, messagePrefix, retries = 2, method = 'POST') {
   const sendsBody = body !== undefined
+  const startedAt = Date.now()
+  // One record per 429 that was actually retried, in order, so the final message
+  // can report what the retry budget was spent on instead of only that it ran
+  // out. Only waits are recorded: the response that ends the call reports its own
+  // `Retry-After` directly, which is what keeps a header from one response from
+  // being quoted as another's.
+  const history = []
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     let response
     try {
@@ -314,9 +359,11 @@ export async function requestJson(url, apiKey, body, signal, webError, messagePr
       }
       // The endpoint is named because a wrong baseURL is one of the things this
       // message has to distinguish; the runtime line names what the process
-      // itself sees, which is the part an outside observer cannot inspect.
+      // itself sees, which is the part an outside observer cannot inspect. The
+      // method is named too: this function also serves the background poll,
+      // which is a GET, and a hardcoded POST would misreport what was attempted.
       throw new webError(
-        `${messagePrefix} request failed: ${describeErrorCause(error)} [POST ${url}] (${describeRuntime()})`,
+        `${messagePrefix} request failed: ${describeErrorCause(error)} [${method} ${url}] (${describeRuntime()})`,
         'WEB_PROVIDER_ERROR',
         { cause: error },
       )
@@ -337,8 +384,14 @@ export async function requestJson(url, apiKey, body, signal, webError, messagePr
       }
     }
 
+    // The header this response carries, read once. The backoff decision below
+    // uses it, and when this is instead the response that ends the call, the
+    // message reports this same value — one read, so the two cannot disagree.
+    const retryAfterHeader = response.headers?.get('retry-after')
+    const requestedWait = retryAfterMs(retryAfterHeader)
     if (response.status === 429 && attempt < retries) {
-      const waitMs = Math.min(retryAfterMs(response.headers.get('retry-after')) ?? 1000 * (2 ** attempt), 10_000)
+      const waitMs = Math.min(requestedWait ?? 1000 * (2 ** attempt), MAX_RETRY_WAIT_MS)
+      history.push({ retryAfterHeader, requestedWait, waitMs })
       try {
         await sleep(waitMs, signal)
       } catch (error) {
@@ -353,13 +406,17 @@ export async function requestJson(url, apiKey, body, signal, webError, messagePr
       continue
     }
 
-    let message = `Perplexity API error (HTTP ${response.status})`
+    // The last word on this response: `status` and `attempt` are read here and
+    // nowhere later, so they are captured before the body is touched.
+    const status = response.status
+    const attempts = attempt + 1
+    let detail
     try {
       const parsed = await response.json()
-      const detail = typeof parsed.error === 'string'
+      const upstream = typeof parsed.error === 'string'
         ? parsed.error
         : parsed.error?.message ?? parsed.message
-      if (detail !== undefined && String(detail).length > 0) message = String(detail)
+      if (upstream !== undefined && String(upstream).length > 0) detail = String(upstream)
     } catch (error) {
       // An abort fired mid-body must surface as WEB_ABORTED, not be swallowed
       // into a generic HTTP-error message.
@@ -369,7 +426,72 @@ export async function requestJson(url, apiKey, body, signal, webError, messagePr
       // Otherwise the HTTP status is already captured above; a malformed error
       // body can only cost a richer message, never the real error.
     }
-    throw new webError(message, 'WEB_PROVIDER_ERROR')
+    // What the retry budget was actually spent on. Only retried 429s recorded a
+    // wait, so this is the backoff history in full rather than just the last one.
+    const retryWaits = history.filter((entry) => entry.waitMs !== undefined)
+    const backoffTotalMs = retryWaits.reduce((total, entry) => total + entry.waitMs, 0)
+    const clamped = retryWaits.filter(
+      (entry) => entry.requestedWait !== undefined && entry.requestedWait > MAX_RETRY_WAIT_MS,
+    ).length
+
+    // The actionable half: this side's facts, none of which the upstream body
+    // can state for itself. Naming the budget and how much of it was spent is
+    // what keeps one sentence from meaning two different things across call
+    // sites: `retries = 0` (a poll that must not loop) and an exhausted
+    // `retries = 2` both end here, and they call for different next moves.
+    let actionable = `HTTP ${status} after ${attempts} ${attempts === 1 ? 'attempt' : 'attempts'} (`
+      + (retries === 0
+        ? 'no retries attempted: the retry budget is 0'
+        : `${attempts - 1} of ${retries} ${retries === 1 ? 'retry' : 'retries'} spent`
+          + `${backoffTotalMs > 0 ? `, waiting ${backoffTotalMs}ms` : ''}`)
+      + `) [Perplexity API]`
+    // The `Retry-After` header is the server's own answer to "when may I come
+    // back", so its presence, value, and use are each stated separately — and
+    // only ever from the response that ended this call. Quoting an earlier 429's
+    // header would attribute it to whatever status actually came back last, which
+    // is exactly the kind of plausible-but-wrong diagnostic this message exists to
+    // replace. The wait is reported as the total actually spent, because the
+    // response that ends the call waited for nothing.
+    if (retryAfterHeader !== undefined && retryAfterHeader !== null) {
+      if (requestedWait !== undefined) {
+        actionable += `; server sent Retry-After: ${retryAfterHeader}`
+          + `${retryWaits.length > 0 ? `, ${backoffTotalMs}ms of backoff spent` : ''}`
+      } else {
+        actionable += `; server sent an unparseable Retry-After: ${retryAfterHeader}`
+      }
+    } else {
+      actionable += '; no Retry-After header'
+    }
+    actionable += `; ${messagePrefix} took ${Date.now() - startedAt}ms`
+    if (clamped > 0) {
+      actionable += `; ${clamped} ${clamped === 1 ? 'wait was' : 'waits were'} capped at `
+        + `${MAX_RETRY_WAIT_MS}ms, shorter than the server asked for`
+    }
+    // The budget is capped at 10s per wait, so *spending* it says nothing about
+    // whether the limit has lifted — only an exhausted budget does. Saying so
+    // keeps the reader from treating this as either a permanent refusal or a
+    // fresh invitation to retry, and keeps a deliberate `retries = 0` (a poll
+    // that must not loop) from being reported as a budget that ran out.
+    if (status === 429 && retries > 0 && attempts > retries) {
+      actionable += `; retry budget of ${retries} exhausted, and a per-wait cap of `
+        + `${MAX_RETRY_WAIT_MS}ms cannot cover a quota window that resets on a minute scale`
+    }
+
+    const upstreamText = detail !== undefined
+      ? `; upstream said: ${JSON.stringify(detail)}`
+      : '; upstream sent no readable error text'
+    const failure = new webError(`${actionable}${upstreamText}`, 'WEB_PROVIDER_ERROR')
+    // The machine-readable half, for a caller that routes on structure rather
+    // than prose. Fields are additive: `code` is still the class to route on.
+    failure.status = status
+    failure.attempts = attempts
+    failure.retries = retries
+    failure.elapsedMs = Date.now() - startedAt
+    failure.retryAfterMs = requestedWait
+    failure.retryAfterSupplied = retryAfterHeader !== undefined && retryAfterHeader !== null
+    failure.backoffTotalMs = backoffTotalMs
+    failure.backoffCapMs = MAX_RETRY_WAIT_MS
+    failure.clampedBackoffs = clamped
+    throw failure
   }
-  throw new webError('Perplexity API error (HTTP 429)', 'WEB_PROVIDER_ERROR')
 }

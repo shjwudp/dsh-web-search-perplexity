@@ -70,9 +70,12 @@ Rules that matter:
    `imageRoots` is refused before any read. Do not try to work around a refusal
    by renaming a file.
 3. An image request is slower than a text search: it uploads the image and then
-   reads it. It ignores the Agent preset and uses the configured image model,
-   because a preset is tuned for speed rather than chosen for vision. Prefer one
-   image with one narrow question over several images per call.
+   reads it, so it gets a larger deadline than the same query as text. It uses
+   the *same* model selector as a text request — the configured preset when there
+   is one, otherwise the configured model — because a preset's own model reads
+   images correctly, and one selector means an image call cannot disagree with a
+   text call about which model answers. Prefer one image with one narrow question
+   over several images per call.
 4. A URL image is fetched by Perplexity, not by the harness. When its fetcher
    cannot retrieve the URL — a stale thumbnail path, a host that blocks
    hotlinking, an expired signed link — the whole request fails with
@@ -119,9 +122,12 @@ for a question that needs many sources or many rounds of reading.
   queries in one call.
 - Use `perplexity_research` when one question needs breadth or depth: comparing
   many sources, building an evidence-backed collection, or reading a lot to
-  answer once. Set `depth` to `medium` (multi-hop, the default), `high`
-  (exhaustive), or `wide` (`wide-research`, for large collections — ask for it
-  explicitly, it runs for minutes).
+  answer once. Leave `depth` unset for an ordinary question — the default is
+  `low` (light multi-step, seconds). Ask for `medium` (multi-hop) when the
+  question genuinely needs several rounds, `high` (exhaustive) when the user
+  asked for exhaustive coverage, and `wide` (`wide-research`, for large
+  collections — ask for it explicitly, it runs for minutes). Depth is not free:
+  an uncapped `high` call takes minutes and costs several times a `low` one.
 - One research call replaces several search calls. Do not run a broad question as
   a batch of `web_search` calls and then also as research; pick one.
 - A research call is synchronous: it returns when the research finishes and
