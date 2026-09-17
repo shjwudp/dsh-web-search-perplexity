@@ -1,51 +1,41 @@
 # @shjwudp/dsh-web-search-perplexity
 
-Standalone Perplexity search provider for the DeepSeek Harness web seam
-(`ctx.web`). It registers search providers for Perplexity, contributes one
-long-research tool, and ships two interchangeable backends:
+A Perplexity-backed search provider for the DeepSeek Harness `ctx.web` seam. It gives
+a DSH agent quick web lookups, and a second tool for research that takes minutes.
 
-- **Agent API** (`POST /v1/agent`, default) — a model-generated, cited answer plus
-  its `search_results[]`, and image input.
-- **Search API** (`POST /search`) — ranked `results[]` with titles, URLs, snippets,
-  and dates, no generated answer, and the filters that endpoint publishes
-  (domains, languages, country, publication dates, recency, result count).
+## What it does
 
-Both map onto the seam's normalized `WebSearchResult`. Text questions and images
-go through the Agent API; the Search API is search-only by design.
+```mermaid
+flowchart TD
+    A["A task needs current, external information"] --> B["web_search<br/>quick fact · a few lookups · 60 s budget"]
+    A --> C["perplexity_research<br/>one question · many sources · 30 min budget"]
+    B --> D["this plugin<br/>the Perplexity provider behind the ctx.web seam"]
+    C --> D
+    D -->|"background submit, then poll"| E["Agent API<br/>POST /v1/agent — default"]
+    D -.->|"searchProvider: perplexity-search"| F["Search API<br/>POST /search"]
+    E --> G["cited answer + sources<br/>image input supported"]
+    F --> H["ranked hits: URL · title · snippet · date"]
+    G --> A
+    H --> A
+```
 
-This package exists because the official
-`@deepseek-ai/dsh-web-search-perplexity` package imports
-`@deepseek-ai/dsh-environment`, which is not published on the npm registry
-(E404) for current dsh releases. This plugin has no internal-only
-dependencies.
+- **Answers, not just links.** By default searches go to Perplexity's Agent API, which
+  returns a synthesized answer with its sources, mapped into the seam's normalized
+  result — so the harness's own `web_search` keeps working exactly as before.
+- **A tool for questions that need minutes.** `perplexity_research` carries its own
+  30-minute budget, so a question that would blow `web_search`'s 60 s ceiling comes back
+  as an answer instead of a timeout.
+- **Images work.** A query naming a local image file or a public image URL is sent to
+  Perplexity as an image, so "what is wrong with this board" is a supported question.
+- **Failures say what happened.** A rate limit, a connection failure, and a backend that
+  researched but returned no answer are three distinct classes, each naming what a
+  reader needs to decide what to do next.
+- **A slow answer is labelled.** When a query is retried on a faster preset, the result
+  says so in a machine-readable field, not only in prose.
 
-## Compatibility
-
-- Tested with **DSH 0.1.5-rc.1** (`@deepseek-ai/dsh-web` 0.1.5-rc.2,
-  `@deepseek-ai/schemastery` 3.18.2). The host version numbers below are DSH's,
-  not this plugin's; this package's own versions are the `v*` tags.
-- Peer dependencies: `@deepseek-ai/dsh-tools: ^0.1.2-rc.1`,
-  `@deepseek-ai/dsh-web: ^0.1.2-rc.1`,
-  `@deepseek-ai/schemastery: ^3.18.1-rc.1`. The declared range is unchanged and
-  its lower bound is where this plugin was first written, so an older 0.1.2-rc.x
-  host satisfies it too.
-- Requires a DSH profile with the `ctx.web` seam mounted and the model-facing
-  tools `web_search` / `web_fetch` enabled (`dsh-tool-web`). In the `web`
-  profile, `dsh-tool-web` is disabled by the web-app layer by default; enable
-  it with `- id: tool-web, disabled: false` in the profile patch.
-- Injects `web`, `tools`, and `systemPrompt`. The latter two are required since
-  the plugin also contributes the `perplexity_research` tool; a composition
-  without either registry fails at load with a message naming the missing
-  service rather than registering nothing.
-- Node ≥ 18
-- The settings card's translations are registered through the client locale
-  service (`ctx.locale.register`, `@deepseek-ai/dsh-client-locale`). On a host
-  without that service the card falls back to English instead of failing, so the
-  plugin stays usable but untranslated.
-- `web_search` applies its own tool budget (`dsh-tool-web`'s `searchTimeoutMs`,
-  30000 by default, 60000 under the shipped agent presets). The soft deadline
-  and its degraded retry are derived to stay inside it — see
-  [Timeouts and latency](#timeouts-and-latency).
+**Why this package exists:** the official `@deepseek-ai/dsh-web-search-perplexity`
+imports `@deepseek-ai/dsh-environment`, which is not published on the npm registry
+(E404) for current dsh releases. This plugin has no internal-only dependencies.
 
 ## Install
 
@@ -53,7 +43,7 @@ dependencies.
 dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.7-rc.1
 ```
 
-Then tell the web seam to use the Perplexity provider in
+Tell the web seam to use the Perplexity provider in
 `~/.dsh/profiles/<profile>/cordis.patch.yml`:
 
 ```yaml
@@ -63,9 +53,11 @@ Then tell the web seam to use the Perplexity provider in
     fetchProvider: http
 ```
 
-Set the API key either in the terminal that starts DSH, or later in the web UI
-(Settings → Plugins → Plugin configuration → Perplexity web search). Never put
-it in a patch file:
+The `web` profile ships with the model-facing tools disabled, so enable them in the
+same patch with `- id: tool-web, disabled: false`.
+
+Set the API key where DSH will read it — in the terminal that starts DSH, or later in
+the web UI at Settings → Plugins → Plugin configuration → Perplexity web search:
 
 ```powershell
 # Windows PowerShell
@@ -77,519 +69,66 @@ $env:PERPLEXITY_API_KEY = "pplx-..."
 export PERPLEXITY_API_KEY="pplx-..."
 ```
 
-Restart DSH. The plugin registers both backends — `perplexity` (Agent API) and
-`perplexity-search` (Search API) — but only the selected one reports itself
-usable, so the seam never sees two candidates. The model-facing tools remain the
-standard `web_search` / `web_fetch` from `dsh-tool-web`.
+Never put the key in a patch file. Restart DSH, and the agent has both tools.
 
-## Choosing a backend
+## Compatibility
 
-| | Agent API (default) | Search API |
-|---|---|---|
-| Endpoint | `POST /v1/agent` | `POST /search` |
-| Returns | generated answer + `search_results[]` | ranked `results[]` only |
-| `content` | the answer | a `[SEARCH]` marker line, no answer |
-| Result count | none on the wire; the seam truncates | native `max_results` (1–20 web, 1–50 people) |
-| Images | yes (`input_image`) | no |
-| Latency (measured) | ~4 s `fast` … ~25 s `medium` narrow | ~1–4 s |
-| Extra filters | recency (via the `web_search` tool) | domains, languages, country, publication dates, recency, `search_type: people` |
+- Needs a DSH profile with the `ctx.web` seam mounted. The plugin injects `web`,
+  `tools`, and `systemPrompt` — all three are required, since it also contributes a
+  tool and a prompt section. A composition missing one fails at load with a message
+  naming it, rather than registering nothing.
+- Needs a Perplexity API key: the `PERPLEXITY_API_KEY` environment variable, or one
+  saved in the settings card.
+- Node ≥ 18. Peer dependencies `@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-web`, and
+  `@deepseek-ai/schemastery` are all optional and declared as `^0.1.2-rc.1` /
+  `^3.18.1-rc.1`; older `0.1.2-rc.x` hosts are within range.
+- Tested with **DSH 0.1.5-rc.1** (`@deepseek-ai/dsh-web` 0.1.5-rc.2,
+  `@deepseek-ai/schemastery` 3.18.2). The host version numbers are DSH's, not this
+  plugin's; this package's own versions are the `v*` tags.
+- Perplexity has replaced its Sonar Chat Completions API with the Agent API (Sonar
+  stays supported until 2026-09-27), so there is no `apiMode` switch and no Sonar
+  fallback.
 
-Pick the Agent API when the model should get a synthesized, cited answer, or when
-it must read an image. Pick the Search API when you want raw ranked hits with
-control over result count and filtering, and intend to read the pages yourself.
-
-Set `searchProvider` to `perplexity-search` to switch; leave it blank (or set
-`perplexity`) to keep the Agent API. In a profile patch:
-
-```yaml
-- id: web-search-perplexity
-  config:
-    searchProvider: perplexity-search
-    searchDomains: [docs.perplexity.ai, arxiv.org]
-    searchContextSize: medium
-```
-
-The two backends are mutually exclusive by construction: while `perplexity-search`
-is selected the Agent provider reports itself unusable, because the seam refuses a
-call when more than one registered provider is usable.
-
-### The Search API backend
-
-- **No generated answer.** `content` carries one machine-readable marker line,
-  `[SEARCH] {"provider":"perplexity-search","sources":8}`, and the sources carry
-  the endpoint's snippets. `web_search` renders those snippets to the model, which
-  is expected to read and reconcile them rather than cite an answer.
-- **`max_results` is native.** The seam's `maxResults` is forwarded, bounded by
-  what the endpoint accepts for the configured `searchType` (20 for web, 50 for
-  people). The seam still truncates on the way back.
-- **`search_context_size` is web-only.** A people search that carries it is
-  rejected against the live endpoint, so the backend omits it for `searchType:
-  people`. That rejection is our own observation rather than a documented rule:
-  the published schema does not forbid the combination, and the only validation
-  code it documents for `/search` is `422`, not `400`. Omitting the field is a
-  precaution, and `searchType: people` loses nothing by it.
-- **Invalid filters are dropped, not sent.** A malformed country code, language
-  code, or date is omitted rather than forwarded, because the endpoint answers a
-  bad filter with `422`. Dates must be `MM/DD/YYYY`; domains are capped at 20 and
-  language codes at 20 two-letter codes.
-- **Images are unsupported.** With this backend selected, an image query is sent
-  as ordinary search text; there is no `input_image` on this endpoint.
-
-A live smoke test for this backend:
-
-```powershell
-cd $env:USERPROFILE\.dsh\profiles\web
-$env:PERPLEXITY_API_KEY = "pplx-..."
-$env:PPLX_TYPE = "people"          # optional: web (default) or people
-$env:PPLX_RECENCY = "month"        # optional
-node C:\path\to\repo\scripts\live-search-api-check.mjs "your query"
-```
-
-## Configuration
+## The settings worth knowing
 
 | Key | Default | Meaning |
 |---|---|---|
-| `apiKey` | unset | Literal Perplexity API key (secret role; normally configured in the UI instead) |
-| `apiKeyEnv` | `PERPLEXITY_API_KEY` | Credential reference used by the UI-stored key |
-| `preset` | unset | Dynamic preset `fast`, `low`, `medium`, `high`, `xhigh`, or `wide-research`. When set, Perplexity picks the model; `model` is only sent as an override if it is a `provider/model` slug. |
-| `baseURL` | `https://api.perplexity.ai` | Endpoint base; `/v1/agent` is appended |
-| `model` | `openai/gpt-5.6-luna` | Agent API model id (`provider/model`, e.g. `openai/gpt-5.6-sol`). Used when no preset is set; a value without `/` falls back to the default |
-| `maxTokens` | `1024` | `max_output_tokens` for `web_search` answers; `perplexity_research` leaves the output budget to the preset (see [Long research](#long-research-the-perplexity_research-tool)) |
-| `searchRecency` | unset | Recency window for the search tool's filter: `day`, `week`, `month`, or `year`. Unset sends no filter |
-| `softTimeoutMs` | per preset, or 40 s for the Search API | One deadline for both backends. On the Agent API it bounds one search before one degraded retry; on the Search API it bounds the request. `0` disables it. Unset = derived from the configured `preset` (`fast`/`low` `12000`; `medium`/`high`/`xhigh`/`wide-research`/unset `40000`). Keep `softTimeoutMs` + 15 s below the tool budget. |
-| `fallbackPreset` | `fast` | Preset used for the single degraded retry (any preset except `wide-research`) |
-| `imageInput` | enabled | Image input. Only the literal `off`/`false`/`0` disables it |
-| `imageMaxBytes` | `10485760` | Per-image byte ceiling for a local image; an oversized image is refused before it is read |
-| `imageRoots` | `[]` (no restriction) | Directory allowlist for local image reads; a path outside every entry is refused |
-| `researchTimeoutMs` | `1800000` | Budget for one `perplexity_research` call, independent of `tool-web`'s search budget. `0` declares no deadline. Read once when the tool registers, so a change takes effect on the next DSH start |
-| `researchDepth` | `low` | Default `depth` for a research call that names none: `low`, `medium`, `high` or `wide`. An unknown value falls back to `low`. Read on every call, so a change applies to the next research call. Also editable in the plugin card's `Advanced settings` |
-| `searchProvider` | `''` (Agent API) | Which backend serves searches: blank or `perplexity` = Agent API; `perplexity-search` = Search API. Only the selected one is usable |
-| `searchType` | `web` | Search API only: `web` or `people`. `people` also raises the result bound to 50 |
-| `searchDomains` | `[]` | Search API only: up to 20 domains or URLs to restrict results to |
-| `searchLanguages` | `[]` | Search API only: up to 20 two-letter ISO 639-1 codes; sent lowercased |
-| `searchCountry` | unset | Search API only: two-letter ISO 3166-1 code, sent uppercased |
-| `searchContextSize` | `medium` | Search API only: `low`, `medium`, or `high` — how much page content each result returns. Omitted for `searchType: people`, which our live runs show rejects it (see the note under the table) |
-| `searchMaxTokensPerPage` | unset | Search API only: explicit per-page content budget (`max_tokens_per_page`) |
-| `searchAfterDate` / `searchBeforeDate` | unset | Search API only: publication-date window as `MM/DD/YYYY` |
+| `apiKey` | unset | Perplexity API key; normally saved in the UI instead |
+| `preset` | unset | Agent preset: `fast`, `low`, `medium`, `high`, `xhigh`, `wide-research` |
+| `searchProvider` | `''` | Blank or `perplexity` = Agent API; `perplexity-search` = Search API |
+| `researchDepth` | `low` | Default depth for `perplexity_research` |
+| `softTimeoutMs` | derived from `preset` | Deadline before one degraded retry; `0` disables it |
+| `imageInput` | enabled | Set to `off` to send image paths as ordinary text |
 
-> **Only the Agent API and the Search API are used.** Perplexity has replaced its
-> Sonar Chat Completions API with the Agent API; Sonar stays supported until
-> **2026-09-27**, so this plugin has no `apiMode` switch. `searchRecency` works on both
-> backends: on the Agent API the window belongs to the `web_search` tool and is
-> sent as `tools[].filters.search_recency_filter` (`day`/`week`/`month`/`year`);
-> on the Search API it is a top-level field and additionally accepts `hour`.
+Everything else — the full 23-key table, the API key resolution order, the settings
+card layout, and how to switch backends — is in
+[configuration](docs/configuration.md).
 
-The provider resolves the API key in this order:
+## Documentation
 
-1. a literal `apiKey` config value (not recommended);
-2. the credentials domain entry named by `apiKeyEnv` — this is what the web UI
-   writes when you save the key in the Perplexity card;
-3. the `PERPLEXITY_API_KEY` process environment variable.
-
-The bundled patch layer deliberately does NOT list `apiKey`; the UI or the
-environment variable are the intended key sources.
-
-## Image input
-
-The provider can send an image to Perplexity for analysis, the same way the
-Perplexity clients accept an attachment. `dsh-tool-web` gives a provider only
-`request.query`, so an image reaches it as a query string:
-
-- a public `https://` image URL ending in `.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`,
-  passed to Perplexity as the image URL, or
-- an absolute path of a local image file, read and sent as a base64 data URI.
-
-A second query in the same call is the text question; with no other query the
-provider asks for an analysis of what the image shows.
-
-```js
-web_search({ queries: ['C:/Users/me/Pictures/board.png', 'identify this board and its documented pinout'] })
-```
-
-Reproduce the live path without a model in the loop — the key is resolved
-through the same credential chain the provider uses (environment, then the
-stored credential), and is never printed:
-
-```powershell
-$env:PERPLEXITY_API_KEY = "pplx-..."
-node scripts/live-image-check.mjs            # optional 2nd arg: a model id
-```
-
-The image travels as `input_image` parts beside the `input_text` question inside
-`/v1/agent`'s `input` array. Allowlisted formats and the 50 MB per-image cap are
-Perplexity's; `imageMaxBytes` is enforced before the file is read.
-
-Three rules keep this from becoming a file-exfiltration path:
-
-1. **Only images are read.** A file is sent only when its extension names an
-   image, its bytes really are that format (PNG/JPEG/GIF/WEBP signature check),
-   and it is within `imageMaxBytes`. A `.png` holding something else is refused
-   with an error rather than uploaded; a file with a non-image extension is left
-   alone and treated as ordinary search text.
-2. **`imageRoots` confines reads.** With entries configured, a path outside every
-   entry is refused before any read, so a research session cannot walk the disk
-   on its own.
-3. **A URL is never fetched locally.** An http(s) query is passed to Perplexity
-   as an image URL, never downloaded by this plugin.
-
-A URL image is only as good as its address: Perplexity fetches it server-side, so
-a URL its fetcher cannot retrieve (a stale thumbnail path, a host that rejects
-hotlinking, an expired signed link) fails the whole request with `invalid
-request`. A local file has no such dependency, because the bytes travel with the
-request.
-
-An image-bearing request keeps the configured preset (or `model`), exactly like a
-text request: there is no separate image model. Measured against the Agent API, a
-preset's own model reads images correctly — `preset: fast` answers an image
-question with `openai/gpt-5.6-luna` and the right answer — so one model selector
-cannot disagree with itself. The one thing to know is that with no preset set,
-the configured `model` must be able to read images; an image sent to a text-only
-model answers badly rather than failing loudly.
-
-The result's `content` starts with a machine-readable marker, because
-`dsh-tool-web`'s closed output schema forwards nothing else:
-
-```
-[IMAGE] {"images":1,"source":["C:/Users/me/Pictures/board.png"],"bytes":48211}
-```
-
-`source` echoes the URL when the image came from the web, and `bytes` is `0`
-for a URL image (nothing was uploaded by this plugin). Direct `ctx.web.search`
-callers also get the same object as `images` on the seam result.
-
-Images are slower and costlier than text: the upload precedes the analysis, and
-Perplexity bills image tokens as `(width × height) / 750` on top of the text
-tokens. An image request therefore gets the text deadline plus
-`IMAGE_ANALYSIS_MARGIN_MS` (12 s), capped where the degraded retry still fits the
-tool budget. That margin is internal on purpose: one deadline is configured, so
-no configuration can pair a text deadline with an image deadline that
-contradicts it.
-
-## Long research: the `perplexity_research` tool
-
-`web_search` cannot run a minutes-long research question: its budget is
-`tool-web.searchTimeoutMs` (60 s under the shipped agent presets), and that row
-lives in each session's agent preset, which a plugin cannot reach. A tool
-declares its own `timeoutMs` — enforced by
-`@deepseek-ai/dsh-tool-call-timeout-policy` — so this plugin contributes a second
-tool that carries its own budget and never runs through `tool-web`'s.
-
-| | `web_search` | `perplexity_research` |
-|---|---|---|
-| Budget | `tool-web.searchTimeoutMs` (60 s shipped) | `researchTimeoutMs` (default 1800000, i.e. 30 minutes) |
-| Input | 1–4 queries | one focused question, plus a depth |
-| Preset | the configured one | chosen by `depth` |
-| Output budget | `maxTokens` (`max_output_tokens`) | the preset's own (128000 for `medium`/`high`); `maxTokens` does **not** apply |
-| Backend | Agent or Search API | Agent API only |
-| Use it for | quick facts, several lookups | one question needing many sources or many rounds |
-
-`maxTokens` is deliberately not applied to research. A preset is sized for its
-job, and overriding that budget with the shared cap starves a multi-step run:
-measured 2026-09-16 against the live API, on the very questions whose runs had
-failed, a 2048-token cap made a `high` research run end with **no answer at
-all** — once as `incomplete` (documented as truncation) and once as `failed` +
-`model_error … (reasoning_only)`, the incident's exact error — while the same
-question with the budget left to the preset answered fully (8 343–11 054 output
-tokens, 2 096–2 718 of them reasoning). This is our own measurement rather than
-documented API behavior: no Perplexity page states that `max_output_tokens` covers
-reasoning tokens, so the mechanism is inferred from these runs, not quoted from the
-docs. Even when the cap did not kill the run it
-cut the answer to roughly a quarter of its length. `web_search` keeps the cap: a
-short answer is that tool's point. The full A/B is in
-`docs/model-stage-no-output.md` §3.1.
-
-`depth` selects the Agent preset: `low` (light multi-step, **the default**),
-`medium` (multi-hop browsing), `high` (exhaustive coverage), or `wide`
-(`wide-research`). The default is `low` on purpose: a default is what most calls
-get, and depth is not free. Measured against the live API on this plugin's own
-incident questions, an uncapped `high` run took ~5 minutes and spent 8 343–11 054
-output tokens, where `low` answers in seconds. Ask for `medium` when the question
-genuinely needs several rounds, `high` when it is exhaustive, and `wide` when the
-answer needs a large evidence-backed collection. The default can be changed for a
-deployment with the `researchDepth` setting.
-
-The tool is registered through `ctx.tools`, so it is available in every session
-of a profile that mounts this plugin — including sessions composed from an agent
-preset, because the preset's `tool-web` row and this tool's budget are separate
-things. `researchTimeoutMs` is read once, when the tool registers, so changing it
-takes effect on the next DSH start; `researchDepth` is read on every call, so
-changing it applies to the next research call. `0` declares no deadline at all.
-
-A long call is still a *synchronous* call: nothing is streamed while it runs. If
-you need unattended research that outlives a turn, that is the Agent API's
-`background` mode and would be a different tool shape (submit, then collect).
-
-### The background lifecycle
-
-Every agent-backed call — `web_search` and `perplexity_research` alike — submits
-with `background: true` and then polls `GET /v1/agent/{id}`. A run is terminal when
-its `status` is `completed`, `failed`, `cancelled`, or `incomplete`; `queued` and
-`in_progress` are the two non-terminal states. Submitting in the background is what
-keeps a minutes-long run from depending on one long-lived connection, which the
-network closes first.
-
-When a deadline expires, the plugin cancels the run it can no longer wait for with
-`POST /v1/agent/{id}/cancel`, and names the id in the error, so a run that was
-already paid for can still be collected with `GET /v1/agent/{id}`.
-
-That cancel call is deliberately best-effort and its failures are swallowed — the
-run may be collectable later by id, and the caller is already receiving the reason
-the call ended early. Two documented responses are therefore worth knowing, because
-a swallowed failure is otherwise invisible:
-
-- cancelling a run that has already reached a terminal status returns `400`, which
-  is expected rather than a fault;
-- an unknown id, or one belonging to another account, returns `404`.
-
-A `200` acknowledges asynchronously with `status: "cancelling"`; the run stops
-shortly after.
-
-## UI surfaces
-
-- **Plugin configuration card**: Settings → Plugins → Plugin configuration
-  shows a collapsible, editable `Perplexity web search` card for the
-  `web-search-perplexity` settings namespace. It opens on the choices that decide
-  behaviour — `baseURL`, the backend selector (`searchProvider`), the API key,
-  and then the backend's own essentials (Agent API: `preset` or `model`,
-  `searchRecency`, `imageInput`; Search API: `searchType`, `searchRecency`,
-  `searchContextSize`). Everything else sits behind one `Advanced settings`
-  disclosure: `maxTokens`, the soft deadline and its fallback preset, and the
-  image settings (`imageMaxBytes`, `imageRoots`) for the Agent API;
-  `searchDomains`, `searchLanguages`, `searchCountry`, the publication-date
-  window, and `searchMaxTokensPerPage` for the Search API.
-  The API key is a write-only secret field either way.
-- **Research settings in the card** (`Advanced settings`): `researchDepth` (a
-  select of the built-in default, `low`, `medium`, `high`, `wide`) and
-  `researchTimeoutMs`. They sit outside the backend branch, because the research
-  tool always runs through the Agent API whatever `searchProvider` selects.
-  Clearing `researchDepth` unsets the key, which means "use the built-in
-  default"; `researchTimeoutMs` accepts `0`, which declares no deadline.
-
-## Timeouts and latency
-
-`web_search` runs under a harness deadline (`dsh-tool-web`'s
-`searchTimeoutMs`, **default 30000**; the shipped agent presets raise it to
-60000, so 60 s is not a safe assumption), and the Perplexity Agent API preset
-decides how long a search actually takes. Measured against the Agent API from an
-ordinary desktop connection:
-
-| preset | measured latency |
+| | |
 |---|---|
-| `fast` | ~4 s |
-| `low` | ~5 s |
-| `medium` | ~25 s for a narrow query, >180 s for a broad one |
-| `wide-research` | minutes; an asynchronous workflow, not a synchronous search |
-
-A broad query on `medium` therefore outlives even a 60 s tool budget. Two guards:
-
-1. **Soft deadline (this plugin).** `softTimeoutMs` bounds one request. When it
-   expires the provider makes exactly one bounded retry on
-   `fallbackPreset` (default `fast`) and returns that answer marked as degraded
-   (see *Degradation is machine-readable* below). Worst case is about
-   `softTimeoutMs` + 15 s, and that sum must stay below the tool budget. Set
-   `softTimeoutMs: 0` to restore the original single-request behavior. The
-   retry is synchronous: no background request, no pending-task table, and no
-   promise outliving the tool call.
-
-   When unset, the deadline is **derived from the configured `preset`** rather
-   than being one preset-independent constant, because no single value can suit
-   presets that differ by two orders of magnitude in latency:
-
-   | `preset` | default `softTimeoutMs` | why |
-   |---|---|---|
-   | `fast`, `low` | `12000` | ~4–5 s measured, so 12 s leaves >2x headroom and still fits the 30 s component budget (`12 + 15 ≤ 30`) |
-   | `medium`, `high`, `xhigh`, `wide-research`, unset | `40000` | `medium` needs ~25 s (25.3 s measured) for a narrow query, so anything at or below that would degrade *every* narrow query; 40 s is the largest value that still leaves the 15 s retry inside the 60 s preset budget |
-
-   A flat default is what made degradation the norm: the previous `25000` sat
-   below `medium`'s own measured 25.3 s narrow latency, so every `medium` narrow
-   query spent 25 s and was then answered by a `fast` retry — strictly worse
-   than either lowering the preset or raising the deadline. `medium` (and
-   slower) genuinely cannot fit a 30 s budget, so under one, lower the preset
-   instead of the deadline.
-2. **The tool budget lives in a `tool-web` row.** A session's model-facing
-   `tool-web` row is supplied by the agent preset that session joins (and falls
-   back to the 30 s component default when nothing sets it), so raising
-   `searchTimeoutMs` in the profile patch alone does not change the deadline a
-   preset-composed session enforces. Copy the shipped composition to
-   `$DSH_HOME/.agent-presets/<id>/agent.cordis.yml`, change
-   `tool-web.searchTimeoutMs` there, and select that preset.
-
-When both attempts exceed their budgets, the provider raises a `WebError` that
-names the soft deadline and suggests a narrower query, instead of letting the
-caller see only the harness's opaque `tool call timed out after <ms>ms`.
-
-### Degradation is machine-readable
-
-A degraded answer is marked twice, so no consumer has to read prose:
-
-1. **`degradation` on the seam result** (`ctx.web.search`), present on every
-   result this provider returns:
-
-   ```json
-   {
-     "degraded": true,
-     "requestedPreset": "medium",
-     "actualPreset": "fast",
-     "softTimeoutMs": 40000,
-     "fallbackTimeoutMs": 15000
-   }
-   ```
-
-   `degraded` is `false` with `actualPreset === requestedPreset` for a
-   full-depth answer, and `fallbackTimeoutMs` is `0` unless a retry ran.
-2. **A `[DEGRADED] {json}` line** as the first line of `content`, carrying the
-   same object. `dsh-tool-web` re-projects the seam result into its own closed
-   `web_search` output schema (`content` / `sources` / `truncated`,
-   `additionalProperties: false`), so `content` is the only field that reaches
-   the model; this line is what survives that boundary.
-
-Treat a result with `degraded: true` as a shallower source: re-verify material
-claims or re-ask narrowly instead of citing it as full-depth research.
-
-### A run that researched but answered nothing
-
-A failed Agent run can hold every retrieval item and no answer at all. The
-provider reports that as its own failure class rather than as a generic run
-failure, because the three nearby failures call for different next moves:
-
-| failure | how it is reported | what it means |
-|---|---|---|
-| rate limit | `HTTP 429 after N attempts (…) …`, `error.status === 429` | wait, or the quota window is closed |
-| connection failure | `Perplexity search request failed: <cause chain> [POST <url>] (pid=… uptime=… runtime=…)` | the request never arrived |
-| **model stage produced nothing** | `AgentModelNoOutputError`, `failureKind: 'model_no_output'` | the request arrived, the research ran, the backend returned no answer |
-
-The message names the upstream `error.code`, the run id, the preset that was
-asked for, how much retrieval completed, that zero `message` items came back,
-whether anything was billed, and the `GET /v1/agent/{id}` URL that still
-retrieves the run. The same facts are fields on the error: `failureKind`,
-`responseId`, `responseIds`, `attempts`, `errorCode`, `preset`, `billed`,
-`retrievalCompleted`, `messageItems`, `answerChars`, `searchResultBatches`,
-`fetchUrlBatches`, and the inherited `response` snapshot. `error.code` stays
-`WEB_PROVIDER_ERROR` — the seam's routing category is unchanged.
-
-Two axes are deliberately independent: **retry safety** is decided by `usage`
-(an unbilled failure is repeated once; a billed one is reported, never repeated),
-while **classification** is decided by the missing answer, so a billed run with
-no output is still classified and still says it was billed.
-
-`error.code: invalid_request` on such a run is reported verbatim but is *not*
-read as a rejection of the request: the run was accepted and completed its
-retrieval, so the code describes the model stage. Do not "fix" the request body
-for it. A client-side degraded-preset fallback was considered and rejected —
-see the decision, the confirmed/upstream split, and the open questions in
-[`docs/model-stage-no-output.md`](docs/model-stage-no-output.md), with the report
-draft in
-[`docs/upstream-report-model-no-output.md`](docs/upstream-report-model-no-output.md).
-`scripts/probe-run-timeline.mjs` dates a run's failure from the harness's own
-session logs when the API's `created_at` cannot (see that doc's §5).
-
-## Response mapping
-
-Agent API:
-
-- `content` ← the answer, joined from the `output_text` parts of the `output[]`
-  item whose `type` is `message`
-- `sources[]` ← `search_results[].results[]` plus
-  `fetch_url_results[].contents[]` (`url`, `title`, `snippet`, `publishedAt` from
-  `date`), deduplicated by URL
-- `truncated` ← `true` when the response's `status` is `incomplete`, the API's own
-  truncation signal; the content also carries a line saying so
-
-Search API: `sources[]` ← `results[]`, and there is no generated answer, so
-`content` is only the `[SEARCH]` marker and `truncated` is always `false`.
-
-Neither backend reads a top-level `citations[]` array: that was the Sonar Chat
-Completions shape, which is no longer used.
-
-HTTP redirects are rejected. Failures surface as `WebError` with
-`WEB_PROVIDER_ERROR` (or `WEB_ABORTED` for abort signals).
+| [configuration](docs/configuration.md) | Every setting, the settings card, and choosing between the two Perplexity backends |
+| [tools](docs/tools.md) | `web_search` vs `perplexity_research`, depths, the background lifecycle, response mapping |
+| [timeouts](docs/timeouts.md) | Tool budgets, measured latency, the derived soft deadline, and degradation markers |
+| [images](docs/images.md) | Sending an image, the three read guards, and what it costs |
+| [failures](docs/failures.md) | How rate limits, connection failures, and a no-output research run each report themselves |
+| [development](docs/development.md) | Tests, `sync:profile`, localization, and the skill's two copies |
+| [model-stage-no-output](docs/model-stage-no-output.md) | The incident that shaped the research path: evidence and the A/B that found the output cap |
+| [upstream-report-model-no-output](docs/upstream-report-model-no-output.md) | The report sent upstream, with reproducible run ids |
 
 ## Development
 
 ```bash
 npm run check        # syntax-check the host, client, and generated skill module
-npm test             # stubbed-fetch host tests, then the settings card's locale dictionaries
+npm test             # ten suites, all offline, no API quota
 npm run build:skill  # regenerate src/skill.js from the markdown skill source
 npm run sync:profile # copy this working tree into every DSH profile that depends on it
 ```
 
-`npm test` runs nine suites, all offline: every one stubs `globalThis.fetch`
-(or the browser half's module loader) and none consumes API quota.
-`test/soft-deadline.test.mjs` loads the host module from this checkout when its
-`dsh-web` / `schemastery` peers resolve (a `node_modules` linked to a DSH
-install), and otherwise from an installed DSH profile copy, so set
-`PPLX_PLUGIN_ENTRY` to test a different built copy. `test/agent-model-failure.test.mjs` drives the shared
-Agent runner directly to pin the model-stage no-output failure class and its
-separation from the 429 and connection-failure paths.
-`test/client-locale.test.mjs` stubs
-`window.__ModuleLoader__` and drives the real browser half, checking that the
-`zh`/`en` dictionaries stay complete and that `apply` registers them.
+See [development](docs/development.md) for what each suite covers, why `sync:profile`
+is needed at all, and the two places the skill can live.
 
-### Installing this checkout into a profile while developing
+## License
 
-A `file:` dependency is not reliably live. pnpm may hardlink the package into the
-profile, in which case an in-place edit propagates — but an editor that writes by
-replacing a file (temp file plus rename) breaks that link, and the installed copy
-then silently goes stale. `pnpm add file:<repo>` does not help afterwards: once
-the specifier and lockfile entry match, it is a no-op and does not refresh
-contents.
-
-So after changing `src/`, run:
-
-```bash
-npm run sync:profile                 # every profile depending on this package
-npm run sync:profile -- web          # one profile, by name or directory path
-```
-
-It copies the published file set into each profile's `node_modules`, then imports
-the installed package the way DSH does and compares hashes, so a broken peer
-resolution or a stale copy fails the command instead of surfacing at the next DSH
-start. Set `DSH_PROFILES_DIR` to override the profile root (default
-`$DSH_HOME/profiles`, then `~/.dsh/profiles`).
-
-`link:` is not an alternative: a symlink makes the plugin resolve from this
-repository, where `@deepseek-ai/schemastery` and `@deepseek-ai/dsh-web` cannot be
-found, and it fails to load with `ERR_MODULE_NOT_FOUND`.
-
-A change to `src/index.js` needs a DSH restart, because the host half is loaded
-per process. `src/client.js` is re-served to the browser, so a reload is enough.
-
-### Localization
-
-The settings card follows the harness language setting. Its copy lives in the
-`DICTS` object in `src/client.js` and is registered through
-`ctx.locale.register('web-search-perplexity', { zh, en })`, which requires both
-shipped locales to carry the same key set. Option values that are identifiers
-(preset names, `day`/`month`, Agent API model ids) are deliberately not
-translated. This README and the embedded skill are English-only.
-
-The embedded `perplexity-research` skill is authored as plain markdown at
-`skills/perplexity-research/SKILL.md`. `src/skill.js` is generated
-from that file; edit the markdown, then run `npm run build:skill` (also run
-automatically before packing/publishing via `prepack`).
-
-#### A deployment can serve the skill from two places
-
-The plugin registers its embedded copy through `ctx.skills`, and a deployment
-that also mounts `@deepseek-ai/dsh-skill-filesystem` serves whatever sits under
-`$DSH_HOME/skills/`. Those are two independent copies of the same skill name, and
-an edit lands in only one of them:
-
-| Edited | Takes effect in |
-|---|---|
-| `skills/…/SKILL.md` + `npm run build:skill` | the plugin's embedded copy, after the host restarts |
-| `$DSH_HOME/skills/perplexity-research/SKILL.md` | that filesystem copy, immediately (its watcher is on by default) |
-
-A deployment that publishes the skill to `$DSH_HOME/skills/` therefore keeps
-serving the published file however many times the repository copy is rebuilt, and
-the two drift silently: a session can load instructions that no longer match the
-plugin. After changing the markdown, publish it to both places:
-
-```powershell
-npm run build:skill
-Copy-Item skills\perplexity-research\SKILL.md $env:USERPROFILE\.dsh\skills\perplexity-research\SKILL.md -Force
-```
-
-Skill bodies are read at load time and the filesystem provider watches its roots,
-so a skill change needs no DSH restart either way — unlike the host half, which
-only loads at process start.
+MIT

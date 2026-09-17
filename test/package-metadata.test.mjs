@@ -20,7 +20,7 @@
  * Run: npm test
  */
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { USER_AGENT } from '../src/shared.js'
@@ -60,6 +60,41 @@ console.log('\n2. the README install pin matches the version being released')
   check('every pinned tag is the current version',
     pins.every((pin) => pin === manifest.version),
     `pinned=${JSON.stringify(pins)} version=${manifest.version}`)
+}
+
+// ── 3. Documentation links resolve ─────────────────────────────────────────
+// The README is a landing page that delegates its detail to `docs/`, so its links
+// are load-bearing: a relative link that points at a renamed or deleted page is a
+// dead end for the reader, and nothing else in the build notices.
+console.log('\n3. every relative documentation link points at a file that exists')
+{
+  const docFiles = [
+    'README.md',
+    ...readdirSync(join(repoRoot, 'docs'))
+      .filter((entry) => entry.endsWith('.md'))
+      .map((entry) => join('docs', entry)),
+  ]
+  const missing = []
+  let checked = 0
+  for (const file of docFiles) {
+    const text = readFileSync(join(repoRoot, file), 'utf8')
+    for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) {
+      const target = match[1]
+      // Absolute URLs and in-page anchors have nothing to resolve on disk.
+      if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith('#')) continue
+      const path = target.split('#')[0]
+      if (path === '') continue
+      checked += 1
+      if (!existsSync(join(repoRoot, dirname(join(file)), path))) {
+        missing.push(`${file} -> ${target}`)
+      }
+    }
+  }
+  check('the documentation contains relative links to check', checked > 0, String(checked))
+  check('every relative link resolves to an existing file', missing.length === 0, missing.join('; '))
+  // Printed rather than only asserted: a guard that scanned nothing would pass the
+  // check above, so the count is what shows this one is doing work.
+  console.log(`        (checked ${checked} relative links across ${docFiles.length} files)`)
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)
