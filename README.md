@@ -48,7 +48,7 @@ imports `@deepseek-ai/dsh-environment`, which is not published on the npm regist
 ## Install
 
 ```bash
-dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.7-rc.1
+dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.7-rc.2
 ```
 
 Tell the web seam to use the Perplexity provider in
@@ -81,7 +81,7 @@ Never put the key in a patch file. Restart DSH, and the agent has both tools.
 
 ## Common settings
 
-A quick-start subset. The full 23-key reference, the settings card, and how to switch
+A quick-start subset. The full 24-key reference, the settings card, and how to switch
 backends are in [configuration](docs/configuration.md).
 
 | Key | Default | Meaning |

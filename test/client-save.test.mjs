@@ -256,5 +256,163 @@ console.log('\n5. the research settings round-trip through the card')
     controller.projection().invalid === true, String(controller.projection().invalid))
 }
 
+// ── 6. The card only reads services its `inject` declares ─────────────────────
+// Cordis offers `ctx.<name>` only for a service the plugin declared; any other
+// read throws `cannot get property "<name>" without inject`. The card reads the
+// parent `ctx.remote` to reach `remote.credentials`, and Cordis registers
+// `remote.credentials` as its own service — so naming only the namespace left
+// `remote` undeclared. The card still rendered, because the constructor's
+// credential read swallows its own errors, and only Save surfaced the failure.
+// This section models the gate so that bug cannot return as a green suite.
+console.log('\n6. the card only reads services it declares')
+{
+  /**
+   * Apply the client half behind a context that enforces Cordis's inject rule.
+   * @param mod - the loaded client module, whose `inject` is the declaration.
+   * @param dropRootRemote - when true, simulate a declaration that names only
+   *   `remote.credentials`, i.e. the shape that shipped the bug.
+   */
+  function gatedController(mod, dropRootRemote) {
+    const declared = new Set(mod.inject ?? [])
+    if (dropRootRemote) declared.delete('remote')
+    const user = {}
+    const scope = {
+      getSnapshot: () => ({ status: 'ready', writable: true, value: {}, base: {}, user }),
+      subscribe: () => () => {},
+      set: async (field, value) => { user[field] = value },
+      unset: async (field) => { delete user[field] },
+    }
+    const credentials = {
+      // `writeKey` only reports success when the credential reads back as
+      // configured, so the stub has to confirm what `set` just stored.
+      describe: async () => ({ ok: true, value: { PERPLEXITY_API_KEY: { configured: true, writable: true } } }),
+      set: async () => ({ ok: true }),
+    }
+    const remote = new Proxy({ credentials }, {
+      get(target, prop, receiver) {
+        if (prop === 'credentials' && !declared.has('remote.credentials')) {
+          throw new Error('cannot get property "remote.credentials" without inject')
+        }
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+    let controller
+    const ctx = {
+      slots: {
+        inject: (_name, register) => register(),
+        register: (slot) => { controller = slot.inject()?.hooks?.perplexityCard; return () => {} },
+      },
+      settingsScope: { bind: () => scope },
+      remote,
+      locale: undefined,
+      effect: undefined,
+    }
+    // Gate the top-level names exactly as Cordis does.
+    for (const name of ['slots', 'settingsScope', 'remote', 'locale']) {
+      const value = ctx[name]
+      Object.defineProperty(ctx, name, {
+        configurable: true,
+        get() {
+          if (!declared.has(name)) throw new Error(`cannot get property "${name}" without inject`)
+          return value
+        },
+      })
+    }
+    mod.apply(ctx)
+    if (controller === undefined) throw new Error('the card was not registered behind the gate')
+    return controller
+  }
+
+  const mod = loadClientModule()
+  check('the client half declares `remote` alongside its namespace',
+    Array.isArray(mod.inject) && mod.inject.includes('remote') && mod.inject.includes('remote.credentials'),
+    JSON.stringify(mod.inject))
+
+  const controller = gatedController(mod, false)
+  controller.actions().edit('apiKey', 'pplx-secret')
+  await controller.actions().save()
+  check('saving the key succeeds when every service it reads is declared',
+    controller.projection().failed === false, controller.projection().lastError)
+
+  const broken = gatedController({ ...mod, inject: (mod.inject ?? []).filter((name) => name !== 'remote') }, true)
+  broken.actions().edit('apiKey', 'pplx-secret')
+  await broken.actions().save()
+  check('dropping `remote` reproduces the reported save failure',
+    broken.projection().failed === true && /without inject/.test(broken.projection().lastError),
+    broken.projection().lastError)
+}
+
+// ── 7. The master switch writes itself, and hides without a host that owns it ─
+// Disabling is deliberately not a staged form field: it has to take effect on
+// its own so a user who only wants the built-in search back does not have to
+// commit unrelated drafts. It also has to disappear — rather than fail on click —
+// while the Host half is still an older copy that does not declare `enabled`,
+// which is the normal state between a browser reload and a DSH restart.
+console.log('\n7. the master switch round-trips and gates on the host schema')
+{
+  /** A card whose host scope declares (or omits) the `enabled` field. */
+  function makeEnabledController({ declaresField = true, set = undefined } = {}) {
+    const mod = loadClientModule()
+    const calls = []
+    const value = declaresField ? { enabled: true } : {}
+    const user = {}
+    let controller
+    const scope = {
+      getSnapshot: () => ({ status: 'ready', writable: true, value, base: {}, user }),
+      subscribe: () => () => {},
+      set: set ?? (async (field, next) => { calls.push(['set', field, next]); value[field] = next; user[field] = next }),
+      unset: async (field) => { calls.push(['unset', field]); delete value[field]; delete user[field] },
+    }
+    const ctx = {
+      slots: {
+        inject: (_name, register) => register(),
+        register: (slot) => { controller = slot.inject()?.hooks?.perplexityCard; return () => {} },
+      },
+      settingsScope: { bind: () => scope },
+      remote: {
+        credentials: {
+          describe: async () => ({ ok: true, value: {} }),
+          set: async () => ({ ok: true }),
+        },
+      },
+      locale: undefined,
+      effect: undefined,
+    }
+    mod.apply(ctx)
+    return { controller, calls }
+  }
+
+  const { controller, calls } = makeEnabledController()
+  check('the switch is offered when the host declares the field',
+    controller.projection().enabledSupported === true && controller.projection().enabled === true)
+
+  await controller.actions().setEnabled(false)
+  check('disabling writes `enabled: false` through the scope',
+    calls.some(([kind, field, next]) => kind === 'set' && field === 'enabled' && next === false),
+    JSON.stringify(calls))
+  check('the card then reads as disabled', controller.projection().enabled === false)
+  check('the switch is never left busy', controller.projection().switching === false)
+  check('disabling stages no draft, so Save is not required',
+    controller.projection().dirty === false)
+  check('disabling is not reported as a failure', controller.projection().switchFailed === false)
+
+  await controller.actions().setEnabled(true)
+  check('re-enabling unsets the override rather than storing `true`',
+    calls.some(([kind, field]) => kind === 'unset' && field === 'enabled'), JSON.stringify(calls))
+  check('the card reads as enabled again', controller.projection().enabled === true)
+
+  const failing = makeEnabledController({ set: async () => { throw new Error('host refused') } })
+  await failing.controller.actions().setEnabled(false)
+  check('a rejected switch is reported, not thrown at the click handler',
+    failing.controller.projection().switchFailed === true
+      && failing.controller.projection().switchError === 'host refused',
+    failing.controller.projection().switchError)
+  check('a rejected switch clears its busy flag', failing.controller.projection().switching === false)
+
+  const older = makeEnabledController({ declaresField: false })
+  check('the switch is hidden while the host does not declare the field',
+    older.controller.projection().enabledSupported === false)
+}
+
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)
 process.exit(failures === 0 ? 0 : 1)

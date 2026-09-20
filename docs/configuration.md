@@ -9,6 +9,7 @@ effect on the next DSH start.
 
 | Key | Default | Meaning |
 |---|---|---|
+| `enabled` | `true` | Master switch. While `false` the plugin releases the `ctx.web` provider selection — so the composition's own provider (the shipped `deepseek-official`) serves search again — and both Perplexity backends report themselves unusable. Read per search; the card's leading button toggles it |
 | `apiKey` | unset | Literal Perplexity API key (secret role; normally set in the UI instead) |
 | `apiKeyEnv` | `PERPLEXITY_API_KEY` | Credential reference used by the UI-stored key |
 | `baseURL` | `https://api.perplexity.ai` | Endpoint base; the path is appended to it |
@@ -57,7 +58,14 @@ environment variable are the intended sources. Never put the key in a patch file
 ## The settings card
 
 Settings → Plugins → Plugin configuration shows a collapsible, editable
-`Perplexity web search` card for this namespace. It opens on the choices that
+`Perplexity web search` card for this namespace. Its first control is the master
+switch: one button that hands search back to the composition's own provider
+(`enabled: false`) or returns it to Perplexity. It writes on its own rather than
+through Save, so a user who only wants the built-in search back does not have to
+commit unrelated drafts; the choice is durable and applies to the next search
+without a restart.
+
+Below it the card opens on the choices that
 decide behaviour — `baseURL`, the backend selector (`searchProvider`), the API key,
 and the backend's own essentials (Agent API: `preset` or `model`, `searchRecency`,
 `imageInput`; Search API: `searchType`, `searchRecency`, `searchContextSize`).

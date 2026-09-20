@@ -127,6 +127,12 @@ window.__ModuleLoader__.load({
           'action.saving': '保存中…',
           'action.discard': '放弃修改',
           'status.saveFailed': '保存失败；草稿已保留。',
+          'action.disable': '停用 Perplexity，改用内置搜索',
+          'action.enable': '启用 Perplexity 搜索',
+          'action.switching': '切换中…',
+          'provider.enabled': 'web_search 由 Perplexity 提供。',
+          'provider.disabled': 'Perplexity 已停用，web_search 使用组合内置的搜索提供方。',
+          'status.switchFailed': '切换失败；',
         },
         en: {
           'card.title': 'Perplexity web search',
@@ -227,6 +233,12 @@ window.__ModuleLoader__.load({
           'action.saving': 'Saving…',
           'action.discard': 'Discard',
           'status.saveFailed': 'Save failed; drafts kept.',
+          'action.disable': 'Disable Perplexity, use built-in search',
+          'action.enable': 'Enable Perplexity search',
+          'action.switching': 'Switching…',
+          'provider.enabled': 'web_search is served by Perplexity.',
+          'provider.disabled': 'Perplexity is off; web_search uses the composition\'s built-in provider.',
+          'status.switchFailed': 'Switch failed;',
         },
       }
       /** English copy, used verbatim when the locale service is unavailable. */
@@ -579,6 +591,13 @@ window.__ModuleLoader__.load({
           this.failed = false
           /** Message from the most recent failed write, shown beside the buttons. */
           this.lastError = ''
+          /**
+           * Master-switch state. It is written on its own rather than staged, so
+           * it has its own busy/failure fields instead of sharing `saving`.
+           */
+          this.switching = false
+          this.switchFailed = false
+          this.switchError = ''
           this.credential = { ref: '', configured: false, writable: true }
           this.snapshot = this.projection()
           scope.subscribe(() => this.publish())
@@ -606,6 +625,11 @@ window.__ModuleLoader__.load({
             saving: this.saving,
             failed: this.failed,
             lastError: this.lastError,
+            enabled: this.isEnabled(),
+            enabledSupported: this.supportsEnabled(),
+            switching: this.switching,
+            switchFailed: this.switchFailed,
+            switchError: this.switchError,
             baseURL: this.field('baseURL'),
             preset: this.field('preset'),
             model: this.field('model'),
@@ -657,6 +681,7 @@ window.__ModuleLoader__.load({
               this.publish()
             },
             save: () => this.save(),
+            setEnabled: (value) => this.setEnabled(value),
             discard: () => {
               if (this.staged.size === 0 && !this.failed && !this.saving) return
               this.staged.clear()
@@ -776,6 +801,54 @@ window.__ModuleLoader__.load({
         async clear(field) {
           await this.scope.unset(field)
           return !this.stored(field)
+        }
+
+        /** Whether the plugin currently owns the `ctx.web` search seam. */
+        isEnabled() {
+          return this.scope.getSnapshot().value?.enabled !== false
+        }
+
+        /**
+         * Whether the host half actually declares the master switch.
+         *
+         * The browser half can be live while an older host half still lacks the
+         * field (a plugin update reloads the card before DSH restarts), and
+         * writing a field the registered schema does not know would fail or be
+         * dropped. Hiding the switch until the Host owns it keeps that window
+         * from offering a control that cannot work.
+         */
+        supportsEnabled() {
+          const value = this.scope.getSnapshot().value
+          return value !== undefined && Object.hasOwn(value, 'enabled')
+        }
+
+        /**
+         * Flip the master switch immediately, without staging it.
+         *
+         * Disabling is not part of the Save/Discard form on purpose: it must take
+         * effect on its own, and a user who only wants the built-in search back
+         * should not have to review or commit unrelated staged drafts. Enabling
+         * clears the stored override rather than writing `true`, so the schema
+         * default governs again.
+         *
+         * @param value - true to let Perplexity serve search, false to release it.
+         */
+        async setEnabled(value) {
+          if (this.switching) return
+          this.switching = true
+          this.switchFailed = false
+          this.switchError = ''
+          this.publish()
+          try {
+            if (value) await this.scope.unset('enabled')
+            else await this.scope.set('enabled', false)
+          } catch (error) {
+            this.switchFailed = true
+            this.switchError = error instanceof Error ? error.message : String(error)
+          } finally {
+            this.switching = false
+            this.publish()
+          }
         }
 
         refOf(snapshot) {
@@ -945,6 +1018,29 @@ window.__ModuleLoader__.load({
             ),
           ),
           expanded ? h('div', { style: styles.body },
+            // The master switch leads the card: handing search back to the
+            // composition's own provider is the one action an ordinary user
+            // comes here for, and it applies on its own rather than via Save.
+            // It renders only once the Host half declares the field.
+            state.enabledSupported
+              ? h('div', { style: styles.field },
+                h('div', { style: styles.row },
+                  h('button', {
+                    style: state.enabled ? styles.button : styles.buttonPrimary,
+                    disabled: disabled || state.switching,
+                    onClick: () => props.setEnabled(!state.enabled),
+                  }, state.switching
+                    ? t('action.switching')
+                    : state.enabled ? t('action.disable') : t('action.enable')),
+                ),
+                h('span', { style: styles.note },
+                  state.enabled ? t('provider.enabled') : t('provider.disabled')),
+                state.switchFailed
+                  ? h('span', { style: styles.error },
+                    state.switchError !== '' ? `${t('status.switchFailed')} ${state.switchError}` : t('status.switchFailed'))
+                  : null,
+              )
+              : null,
             h(Field, { t, label: t('field.baseURL'), field: 'baseURL', state: state.baseURL, disabled, edit: props.edit }),
             h(SelectField, { t, label: t('field.searchProvider'), field: 'searchProvider', state: state.searchProvider, disabled, edit: props.edit, options: BACKEND_OPTIONS }),
             h(SecretField, { t, state, disabled, edit: props.edit }),
@@ -1072,7 +1168,7 @@ window.__ModuleLoader__.load({
       }
 
       exports.apply = apply
-      exports.inject = ['slots', 'settingsScope', 'remote.credentials', 'locale']
+      exports.inject = ['slots', 'settingsScope', 'remote', 'remote.credentials', 'locale']
     } catch (error) {
       console.warn('[dsh-web-search-perplexity] client init failed', error)
       exports.apply = function () {}

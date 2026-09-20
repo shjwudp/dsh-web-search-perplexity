@@ -308,6 +308,16 @@ function researchToolOptions(ctx, config, deps) {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const settings = config()
+      // The card's master switch also silences this tool: leaving it live would
+      // keep sending Perplexity requests (and billing them) after the user
+      // asked for the built-in search back.
+      if (settings.enabled === false) {
+        throw new WebError(
+          'Perplexity web search is disabled. Re-enable it in Settings → Plugins → '
+          + 'Plugin configuration → Perplexity web search to use perplexity_research.',
+          'WEB_PROVIDER_UNAVAILABLE',
+        )
+      }
       // Read the configured default here, not at registration: a changed
       // `researchDepth` applies to the next call. An explicit `depth` always wins.
       const { question, preset } = parseResearchArgs(args, researchDepth(settings))

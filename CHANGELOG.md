@@ -3,6 +3,44 @@
 Notable changes to `@shjwudp/dsh-web-search-perplexity`, newest first. Entries
 describe behaviour, not commits; the `v*` tags carry the full history.
 
+## v0.1.7-rc.2
+
+A release candidate. It fixes saving the API key and adds a way to hand search
+back to the composition's own provider without uninstalling the plugin.
+
+### Added
+
+- **An `enabled` master switch**, led by a one-click button at the top of the
+  settings card: *Disable Perplexity, use built-in search* / *Enable Perplexity
+  search*. While it is off the plugin releases the seam's configured provider id
+  (`ctx.web.searchProviderId`), so the composition's own provider — the shipped
+  `deepseek-official` — serves `web_search` again, and both Perplexity backends
+  report themselves unusable. Releasing the id is what makes it work: the seam
+  answers a configured-but-unavailable provider by throwing
+  (`WEB_PROVIDER_CONFIGURED_UNAVAILABLE`), never by falling back. The released id
+  is remembered, so re-enabling restores exactly what the deployment had
+  configured rather than assuming `perplexity`. The switch is durable, applies to
+  the next call without a restart, writes without going through Save/Discard so
+  unrelated drafts are untouched, and also makes `perplexity_research` refuse —
+  a plugin the user turned off should stop issuing requests and billing them.
+
+### Fixed
+
+- **Saving the API key failed with `cannot get property "remote" without
+  inject`.** The browser half read the parent `ctx.remote` service while
+  declaring only the `remote.credentials` namespace. Cordis registers
+  `remote.credentials` as a service of its own, so injecting the namespace never
+  covered `remote`. The card still rendered because the constructor's credential
+  read swallows its own errors; only Save surfaced it. `exports.inject` now names
+  `remote` as well, which is what the host's own plugin-configuration card does.
+
+### Changed
+
+- **The button hides itself until the Host half declares `enabled`**, so a browser
+  half that reloads ahead of a DSH restart cannot offer a control that would fail.
+  The Host HMR watcher ignores `node_modules/`, so that window is the normal case
+  rather than an edge one.
+
 ## v0.1.7-rc.1
 
 A release candidate. It replaces the plugin's backend wholesale and is not a

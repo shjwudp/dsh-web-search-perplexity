@@ -256,6 +256,12 @@ const SEARCH_RECENCY_VALUES = ['day', 'week', 'month', 'year']
 const Config = z.object({
   apiKey: z.string().role('secret'),
   apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
+  // Master switch owned by this plugin's settings card. While false the plugin
+  // releases the `ctx.web` seam selection so the composition's own provider
+  // (the shipped `deepseek-official`) serves search again, and both Perplexity
+  // backends report themselves unavailable. Read per search, so toggling it in
+  // the UI applies to the next call instead of the next DSH start.
+  enabled: z.boolean().default(true),
   preset: z.string().default(''),
   baseURL: z.string().default(DEFAULT_BASE_URL),
   model: z.string().default(AGENT_DEFAULT_MODEL),
@@ -593,6 +599,7 @@ function resolveOptions(ctx, config) {
     ? 0
     : Math.min(softTimeoutMs + IMAGE_ANALYSIS_MARGIN_MS, MAX_SOFT_TIMEOUT_MS)
   return {
+    enabled: c.enabled !== false,
     apiKey: literalApiKey,
     apiKeyEnv,
     searchApi,
@@ -772,12 +779,32 @@ export function apply(ctx, config = {}) {
     }
   }
 
+  // The seam resolves a configured-but-unavailable provider by throwing, never
+  // by falling back to an unconfigured one, so `enabled: false` cannot be
+  // expressed through `available()` alone: the configured id itself has to be
+  // released. The id that was released is remembered so re-enabling restores
+  // exactly it rather than assuming which provider the composition named.
+  let releasedSeamProvider
+  const applySeamSelection = () => {
+    if (current().enabled !== false) {
+      if (releasedSeamProvider !== undefined) {
+        ctx.web.searchProviderId = releasedSeamProvider
+        releasedSeamProvider = undefined
+      }
+      return
+    }
+    if (ctx.web.searchProviderId !== undefined) releasedSeamProvider = ctx.web.searchProviderId
+    ctx.web.searchProviderId = undefined
+  }
+
   ctx.inject(['settings'], (settingsCtx) => {
     settingsCtx.settings.installSection(ctx, SETTINGS_NAMESPACE, Config, config, {
       setSource: (source) => {
         current = source
       },
-      onChange: () => {},
+      // installSection calls this once with the resolved section and again on
+      // every committed change, so the seam follows the card without a restart.
+      onChange: () => applySeamSelection(),
     })
   })
 
@@ -806,13 +833,21 @@ export function apply(ctx, config = {}) {
   ctx.web.registerSearchProvider(new PerplexitySearchApiProvider(
     ctx,
     current,
-    () => resolveOptions(ctx, current()).searchApi,
+    () => {
+      const options = resolveOptions(ctx, current())
+      // The master switch gates the Search API backend on the same terms as the
+      // Agent one, so a disabled plugin never reports either backend usable.
+      return options.enabled && options.searchApi
+    },
   ))
 
   ctx.web.registerSearchProvider({
     id: 'perplexity',
     available() {
       const options = resolveOptions(ctx, current())
+      // Disabled: report unusable so auto-selection (the seam id having been
+      // released above) can settle on the composition's own provider.
+      if (!options.enabled) return false
       // Only the Agent backend is usable when it is the configured one: two
       // usable providers would make the seam's selection ambiguous.
       if (options.searchApi) return false
