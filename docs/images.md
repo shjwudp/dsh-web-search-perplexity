@@ -1,8 +1,11 @@
 # Image input
 
 The provider can send an image to Perplexity for analysis, the same way the
-Perplexity clients accept an attachment. `dsh-tool-web` gives a provider only
-`request.query`, so an image reaches it as a query string:
+Perplexity clients accept an attachment. This is the `web_search` provider path;
+the [`perplexity_research` tool](#the-research-tool-takes-an-explicit-image-argument)
+takes an image as an explicit argument instead. `dsh-tool-web` gives a provider
+only `request.query`, so on the provider path an image reaches it as a query
+string:
 
 - a public `https://` image URL ending in `.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`,
   passed to Perplexity as the image URL, or
@@ -14,6 +17,31 @@ provider asks for an analysis of what the image shows.
 ```js
 web_search({ queries: ['C:/Users/me/Pictures/board.png', 'identify this board and its documented pinout'] })
 ```
+
+## The research tool takes an explicit `image` argument
+
+`perplexity_research` does not go through the seam, so it can accept an image as
+a real argument instead of as query text:
+
+```js
+perplexity_research({ question: 'identify this board and its documented pinout', image: 'C:/Users/me/Pictures/board.png' })
+```
+
+It accepts the same two forms and applies the same read guards as the provider
+path — the guards are the shared `src/image.js` module, not a second copy — so
+everything below about `imageRoots`, `imageMaxBytes`, the byte sniff, and the
+marker holds for it too. Two differences are deliberate:
+
+- the question stays the text question, where the provider path has to infer
+  which query is text and which is the image;
+- a value that is not a readable, allowed image is **refused**, where the
+  provider path treats it as ordinary search text. An explicit argument the
+  caller asked for must not silently become a text-only call.
+
+This is the branch to use when the deployment pins the global search provider:
+the base patch pins `searchProvider: deepseek-official`, so the plugin's own
+`web_search` provider is never selected, while the research tool calls
+Perplexity directly and is unaffected by the pin.
 
 ## The rules that keep this from becoming an exfiltration path
 

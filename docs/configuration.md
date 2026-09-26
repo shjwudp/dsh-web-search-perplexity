@@ -19,9 +19,9 @@ effect on the next DSH start.
 | `searchRecency` | unset | Recency window: `day`, `week`, `month`, `year`. Unset sends no filter. `hour` is Search API only |
 | `softTimeoutMs` | per preset, or 40 s for the Search API | One deadline for both backends. Unset = derived from `preset` (`fast`/`low` `12000`; `medium`/`high`/`xhigh`/`wide-research`/unset `40000`). `0` disables it. See [timeouts](timeouts.md) |
 | `fallbackPreset` | `fast` | Preset for the single degraded retry (any preset except `wide-research`) |
-| `imageInput` | enabled | Image input. Only the literal `off`/`false`/`0` disables it |
+| `imageInput` | enabled | Image input on both paths. Only the literal `off`/`false`/`0` disables it; off ignores `perplexity_research`'s `image` argument and sends an image query as text |
 | `imageMaxBytes` | `10485760` | Per-image byte ceiling; an oversized image is refused before it is read |
-| `imageRoots` | `[]` (no restriction) | Directory allowlist for local image reads; a path outside every entry is refused. See [images](images.md) |
+| `imageRoots` | `[]` (no restriction) | Directory allowlist for local image reads; a path outside every entry is refused. Applies to `web_search` and `perplexity_research`. See [images](images.md) |
 | `researchTimeoutMs` | `1800000` | Budget for one `perplexity_research` call, independent of `tool-web`'s search budget. `0` declares no deadline. **Restart** |
 | `researchDepth` | `low` | Default `depth` for a research call that names none. An unknown value falls back to `low`. Read per call |
 | `searchProvider` | `''` (Agent API) | Which backend serves searches: blank or `perplexity` = Agent API; `perplexity-search` = Search API. Only the selected one is usable |
@@ -94,7 +94,7 @@ that service it falls back to English rather than failing. See
 | Returns | generated answer + `search_results[]` | ranked `results[]` only |
 | `content` | the answer | a `[SEARCH]` marker line, no answer |
 | Result count | none on the wire; the seam truncates | native `max_results` (1–20 web, 1–50 people) |
-| Images | yes | no |
+| Images | yes | no (for `web_search`; `perplexity_research` always uses the Agent API) |
 | Latency (measured) | ~4 s `fast` … ~25 s `medium` narrow | ~1–4 s |
 | Extra filters | recency, via the `web_search` tool | domains, languages, country, publication dates, recency, `search_type: people` |
 
@@ -127,5 +127,7 @@ call when more than one registered provider is usable.
   code, or date is omitted rather than forwarded, because the endpoint answers a
   bad filter with `422`. Dates must be `MM/DD/YYYY`; domains and language codes are
   capped at 20 each.
-- **Images are unsupported.** With this backend selected, an image query is sent as
-  ordinary search text; there is no `input_image` on this endpoint.
+- **Images are unsupported by `web_search` on this backend.** While the Search API is
+  selected, an image query is sent as ordinary search text; there is no `input_image` on
+  this endpoint. `perplexity_research` is unaffected: it always calls the Agent API, so
+  its `image` argument still attaches an image. See [images](images.md).

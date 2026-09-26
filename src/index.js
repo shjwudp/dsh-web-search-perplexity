@@ -47,10 +47,16 @@
  * `content`, carrying the same JSON as `images` on the seam result.
  */
 
-import { readFile, stat } from 'node:fs/promises'
-import { basename, isAbsolute, relative, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { WebError } from '@deepseek-ai/dsh-web'
+import {
+  DEFAULT_IMAGE_MAX_BYTES,
+  buildImageRequest,
+  imageRequestBody,
+  resolveImageAttachment,
+  withImageMarker,
+} from './image.js'
 import { PERPLEXITY_RESEARCH_SKILL } from './skill.js'
 import { PerplexitySearchApiProvider, SEARCH_API_PROVIDER_ID } from './search-api.js'
 import { DEFAULT_RESEARCH_TIMEOUT_MS, applyResearchTool, researchTimeoutMs } from './research.js'
@@ -69,6 +75,12 @@ export const inject = ['web', 'tools', 'systemPrompt']
 // the same rule; re-exported here so this package's single entry point exposes
 // it and a test can assert the request path and the exposed boolean agree.
 export { IMAGE_INPUT_DISABLED_VALUES, isImageInputEnabled } from './shared.js'
+
+// The image plumbing itself lives in `./image.js`, shared with the research
+// tool so the two cannot drift about what a refusal is or what an image request
+// looks like. The marker stays re-exported here because callers and tests import
+// it from this package's entry point.
+export { IMAGE_MARKER_PREFIX } from './image.js'
 
 export {
   DEFAULT_RESEARCH_TIMEOUT_MS,
@@ -185,46 +197,6 @@ export const PRESET_SOFT_TIMEOUT_MS = Object.freeze({
 /** Deadline for an Agent-mode request that names no preset. */
 const DEFAULT_SOFT_TIMEOUT_MS = MAX_SOFT_TIMEOUT_MS
 const DEFAULT_FALLBACK_PRESET = 'fast'
-
-/**
- * Per-image byte ceiling. Perplexity's own base64 limit is 50 MB.
- *
- * An image request carries no model of its own: measured against the Agent API,
- * a preset's own model reads images correctly (`preset: fast` answers an image
- * question with `openai/gpt-5.6-luna` and the right answer), so image and text
- * requests share one model selector and cannot disagree.
- */
-const DEFAULT_IMAGE_MAX_BYTES = 10 * 1024 * 1024
-const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
-
-/** Media type selected by a file extension, for an extension that names an image. */
-const IMAGE_MEDIA_TYPE_BY_EXTENSION = Object.freeze({
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-})
-
-/** Extension of each allowed media type, used in the refusal messages. */
-const IMAGE_EXTENSION_BY_MEDIA_TYPE = Object.freeze({
-  'image/png': '.png',
-  'image/jpeg': '.jpg',
-  'image/gif': '.gif',
-  'image/webp': '.webp',
-})
-
-/** A local image path candidate: the leading character of a filesystem path. */
-const LOCAL_IMAGE_PATH_PATTERN = /^(?:[A-Za-z]:[\\/]|\\\\|\/|\.{1,2}[\\/])/
-/** A candidate image URL: public HTTPS with a recognized image extension. */
-const IMAGE_URL_PATTERN = /^https:\/\/\S+\.(?:png|jpe?g|gif|webp)(?:\?\S*)?$/i
-
-/**
- * Prefix of the machine-readable image line prepended to `content`. Like
- * `DEGRADED_MARKER_PREFIX`, this is the only route for the `images` object on
- * the seam result into `dsh-tool-web`'s closed `web_search` output schema.
- */
-export const IMAGE_MARKER_PREFIX = '[IMAGE] '
 
 /**
  * The soft deadline one Agent preset gets when `softTimeoutMs` is not
@@ -366,172 +338,6 @@ function mapAgentResponse(data) {
   }
 }
 
-/** Detect an image media type from leading bytes, independent of any extension. */
-function sniffImageMediaType(bytes) {
-  if (bytes.length >= 8
-    && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
-    && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return 'image/png'
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
-  if (bytes.length >= 6) {
-    const gif = String.fromCharCode(...bytes.subarray(0, 6))
-    if (gif === 'GIF87a' || gif === 'GIF89a') return 'image/gif'
-  }
-  if (bytes.length >= 12
-    && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF'
-    && String.fromCharCode(...bytes.subarray(8, 12)) === 'WEBP') return 'image/webp'
-  return undefined
-}
-
-/** True when `path` is inside one of the configured roots, or no roots are set. */
-function isWithinImageRoots(path, roots) {
-  if (roots.length === 0) return true
-  return roots.some((root) => {
-    const candidate = relative(root, path)
-    return candidate === '' || (!candidate.startsWith('..') && !isAbsolute(candidate))
-  })
-}
-
-/**
- * Read one local image query and turn it into a data URI.
- *
- * @param {string} path - the query, read as a filesystem path.
- * @param {object} options - resolved provider options.
- * @returns {Promise<{kind: 'image', mediaType: string, dataUri: string, bytes: number}>}
- *   the inline image, or `{kind: 'text'}` when the path is not an image at all.
- * @throws {WebError} when the path names a file that is refused — outside
- *   `imageRoots`, over `imageMaxBytes`, or not the image format its extension
- *   claims. A refusal is never silent: shipping a non-image file to Perplexity
- *   is exactly what the checks exist to prevent.
- */
-async function readLocalImageQuery(path, options) {
-  const resolvedPath = resolve(path)
-  if (!isWithinImageRoots(resolvedPath, options.imageRoots)) {
-    throw new WebError(
-      `The image query "${path}" is outside the configured imageRoots `
-      + `(${options.imageRoots.join(', ')}). Add that directory to `
-      + 'web-search-perplexity.imageRoots, or pass a public https image URL instead.',
-      'WEB_PROVIDER_ERROR',
-    )
-  }
-
-  let stats
-  try {
-    stats = await stat(resolvedPath)
-  } catch {
-    // Not an existing file: an ordinary text query, not a failed image one.
-    return { kind: 'text' }
-  }
-  if (!stats.isFile()) return { kind: 'text' }
-  // The extension is read from the file NAME, not from the whole path:
-  // `lastIndexOf('.')` on a path finds a dot in a directory name, so an
-  // extensionless image under `C:\shots.v2\` would carry the "extension"
-  // `.v2\photo` and be sent as an ordinary text query.
-  const fileName = basename(resolvedPath)
-  const dot = fileName.lastIndexOf('.')
-  const extension = dot > 0 ? fileName.slice(dot).toLowerCase() : ''
-  let claimed = IMAGE_MEDIA_TYPE_BY_EXTENSION[extension]
-  if (claimed === undefined) {
-    // No extension at all can still be an image (normalized attachment objects
-    // are content-addressed and carry none); a wrong or non-image extension is
-    // an ordinary query, not an image to read.
-    if (extension.startsWith('.')) return { kind: 'text' }
-    claimed = 'image/png'
-  }
-  if (stats.size > options.imageMaxBytes) {
-    throw new WebError(
-      `The image query "${path}" is ${stats.size} bytes, above imageMaxBytes `
-      + `(${options.imageMaxBytes}). Lower the image resolution or raise `
-      + 'web-search-perplexity.imageMaxBytes (the Perplexity per-image cap is 50 MB).',
-      'WEB_PROVIDER_ERROR',
-    )
-  }
-  const bytes = await readFile(resolvedPath)
-  const mediaType = sniffImageMediaType(bytes) ?? undefined
-  if (mediaType === undefined || mediaType !== claimed) {
-    // The path exists and is not confidently this image format: treat an
-    // unrecognized file as text rather than shipping an arbitrary document.
-    if (extension in IMAGE_MEDIA_TYPE_BY_EXTENSION) {
-      throw new WebError(
-        `The image query "${path}" has an ${extension} extension but its bytes are not `
-        + `${claimed}. Rename the file to its real format, or pass a public https image URL.`,
-        'WEB_PROVIDER_ERROR',
-      )
-    }
-    return { kind: 'text' }
-  }
-  return {
-    kind: 'image',
-    mediaType,
-    dataUri: `data:${mediaType};base64,${Buffer.from(bytes).toString('base64')}`,
-    bytes: bytes.length,
-  }
-}
-
-/**
- * Classify one query as an image to attach or as ordinary search text.
- *
- * @param {string} query - one `web_search` query.
- * @param {object} options - resolved provider options.
- * @returns {Promise<{kind: 'image', source: string, mediaType?: string, dataUri: string, bytes?: number}
- *   | {kind: 'text'}>} the classification; `dataUri` is the URL itself for a URL image.
- */
-async function classifyImageQuery(query, options) {
-  const text = typeof query === 'string' ? query.trim() : ''
-  if (text.length === 0) return { kind: 'text' }
-  if (IMAGE_URL_PATTERN.test(text)) return { kind: 'image', source: text, dataUri: text }
-  if (text.startsWith('http://') || text.startsWith('https://') || text.startsWith('//')) {
-    // A web address never names a local file, whatever its extension.
-    return { kind: 'text' }
-  }
-  const looksLikeLocalPath = LOCAL_IMAGE_PATH_PATTERN.test(text) || isAbsolute(text)
-  if (!looksLikeLocalPath) return { kind: 'text' }
-  const read = await readLocalImageQuery(text, options)
-  return read.kind === 'image' ? { ...read, source: text } : read
-}
-
-/**
- * Build the request body for one image-bearing search, separating the text
- * question (a non-image query in the same call) from the attached images.
- *
- * @param {string[]} queries - the queries of one search call.
- * @param {object} options - resolved provider options.
- * @returns {Promise<{body: object, marker: object}|undefined>} the `input` message
- *   array plus its model-facing marker, or `undefined` when this call carries no
- *   image.
- */
-async function buildImageRequest(queries, options) {
-  // `options.imageInput` is already the boolean `resolveOptions` produced, but
-  // the decision function is applied again so a raw string is accepted too: the
-  // request path and the settings projection answer "is image input on?" the
-  // same way by construction rather than by two expressions happening to agree.
-  if (!isImageInputEnabled(options.imageInput)) return undefined
-  const classified = []
-  for (const query of queries) classified.push(await classifyImageQuery(query, options))
-  const images = classified.filter((item) => item.kind === 'image')
-  if (images.length === 0) return undefined
-  const textQueries = queries.filter((_, index) => classified[index]?.kind !== 'image')
-  const question = textQueries.join('\n').trim()
-    || 'Analyze this image and research what it shows using web sources.'
-  const marker = {
-    images: images.length,
-    source: images.map((image) => image.source),
-    bytes: images.reduce((total, image) => total + (image.bytes ?? 0), 0),
-  }
-
-  return {
-    marker,
-    body: {
-      input: [{
-        role: 'user',
-        content: [
-          { type: 'input_text', text: question },
-          ...images.map((image) => ({ type: 'input_image', image_url: image.dataUri })),
-        ],
-      }],
-    },
-  }
-}
-
 /**
  * The Agent API `web_search` tool entry: its type plus every configured filter.
  * `searchRecency` is the same `day`/`week`/`month`/`year` window the Sonar API
@@ -547,21 +353,6 @@ function webSearchTool(options) {
     ...(options.searchRecency !== undefined
       ? { filters: { search_recency_filter: options.searchRecency } }
       : {}),
-  }
-}
-
-/**
- * Attach the model-facing image marker to a mapped response. `content` is the
- * only field `dsh-tool-web` forwards to the model, so the marker line is what
- * tells it which image was analyzed.
- */
-function withImageMarker(mapped, marker) {
-  const line = `${IMAGE_MARKER_PREFIX}${JSON.stringify(marker)}`
-  return {
-    ...mapped,
-    content: mapped.content !== undefined && mapped.content.length > 0
-      ? `${line}\n\n${mapped.content}`
-      : line,
   }
 }
 
@@ -833,6 +624,12 @@ export function apply(ctx, config = {}) {
     agentRequestBody,
     agentImageRequestBody,
     buildImageRequest,
+    // The explicit `image` argument of the research tool: the strict read guards
+    // and the content-part assembly are shared with the provider path rather
+    // than reimplemented in the tool.
+    imageRequestBody,
+    resolveImageAttachment,
+    withImageMarker,
     mapAgentResponse,
     resolveApiKey,
     resolveOptions,

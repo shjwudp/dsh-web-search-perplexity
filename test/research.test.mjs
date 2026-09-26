@@ -7,12 +7,20 @@
  * preset runs for minutes. These tests pin that budget, the preset each depth
  * selects, and the request the tool actually sends.
  *
+ * They also pin the tool's optional `image` argument: the request shape it
+ * builds, the read guards it shares with the provider path (`imageRoots`,
+ * `imageMaxBytes`, the byte sniff), and what `imageInput` off does to it. Every
+ * local-image case writes its own file under the OS temp directory and declares
+ * that directory in `imageRoots`, so nothing depends on the developer's home
+ * directory.
+ *
  * `globalThis.fetch` is stubbed, so nothing here touches the network.
  *
  * Run: npm test
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -49,6 +57,7 @@ const plugin = await import(MODULE)
 const {
   apply,
   DEFAULT_RESEARCH_TIMEOUT_MS,
+  IMAGE_MARKER_PREFIX,
   RESEARCH_DEFAULT_DEPTH,
   RESEARCH_DEPTHS,
   RESEARCH_TOOL_NAME,
@@ -57,7 +66,8 @@ const {
   researchDepth,
   researchTimeoutMs,
 } = plugin
-if (typeof apply !== 'function' || typeof RESEARCH_TOOL_NAME !== 'string') {
+if (typeof apply !== 'function' || typeof RESEARCH_TOOL_NAME !== 'string'
+  || typeof IMAGE_MARKER_PREFIX !== 'string') {
   console.error('This copy does not export the research surface; sync the working tree first.')
   process.exit(1)
 }
@@ -216,8 +226,8 @@ console.log('\n3. the tool schema offers the documented parameters')
   // `defineTool` compiles the DSL, so the tool carries a JSON Schema rather than
   // the declaration it was built from.
   const params = tool.parameters
-  check('the root is an object with the two parameters',
-    params.type === 'object' && JSON.stringify(Object.keys(params.properties)) === JSON.stringify(['question', 'depth']),
+  check('the root is an object with the three parameters',
+    params.type === 'object' && JSON.stringify(Object.keys(params.properties)) === JSON.stringify(['question', 'depth', 'image']),
     JSON.stringify(Object.keys(params.properties ?? {})))
   check('question is a required string',
     params.required?.includes('question') === true && params.properties.question.type === 'string',
@@ -228,7 +238,20 @@ console.log('\n3. the tool schema offers the documented parameters')
   check('the depth description names each option',
     Object.values(RESEARCH_DEPTHS)
       .every((entry) => params.properties.depth.description.includes(entry.description)))
+  check('image is an optional string, so a text-only call is unchanged',
+    params.properties.image.type === 'string' && params.required?.includes('image') !== true,
+    `type=${params.properties.image.type} required=${JSON.stringify(params.required)}`)
+  check('the image description names both accepted forms and a refusal',
+    params.properties.image.description.includes('https') && params.properties.image.description.includes('imageRoots'),
+    params.properties.image.description.slice(0, 120))
+  check('the image marker is declared on the output, but not required',
+    tool.output.schema.properties.images !== undefined
+      && tool.output.schema.required?.includes('images') !== true,
+    JSON.stringify(Object.keys(tool.output.schema.properties ?? {})))
   check('the tool registers a prompt section', makeTool(baseConfig).sections.length === 1)
+  check('the prompt section tells the model the tool takes an image',
+    makeTool(baseConfig).sections[0].text.includes('optional image'),
+    makeTool(baseConfig).sections[0].text.slice(0, 160))
 }
 
 // ── 4. The answer and its sources come back model-ready ────────────────────
@@ -601,6 +624,152 @@ console.log('\n11. research sends no output cap, and web_search still does')
     searchCalls[0]?.body?.max_output_tokens === baseConfig.maxTokens,
     JSON.stringify(searchCalls[0]?.body))
 }
+
+// ── 12-16. The optional `image` argument ────────────────────────────────────
+// A research question about a diagram is still one focused question, but until
+// now an image could only reach this tool by *being* the question. The explicit
+// argument keeps the question the text question and applies the provider path's
+// read guards to the named image. The fixtures live in their own temp directory,
+// which is the only declared `imageRoots` entry.
+const imageDir = mkdtempSync(join(tmpdir(), 'pplx-research-image-'))
+const outsideDir = mkdtempSync(join(tmpdir(), 'pplx-research-outside-'))
+const pngPath = join(imageDir, 'shot.png')
+const textAsPngPath = join(imageDir, 'notes.png')
+const textPath = join(imageDir, 'notes.txt')
+const bigPath = join(imageDir, 'huge.png')
+const outsidePath = join(outsideDir, 'private.png')
+/** 1x1 PNG, the smallest valid raster the media-type sniffer accepts. */
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC',
+  'base64',
+)
+writeFileSync(pngPath, PNG_1X1)
+writeFileSync(textAsPngPath, 'this is not a raster image\n')
+writeFileSync(textPath, 'not an image\n')
+writeFileSync(bigPath, Buffer.concat([PNG_1X1, Buffer.alloc(4096)]))
+writeFileSync(outsidePath, PNG_1X1)
+const imageConfig = { ...baseConfig, preset: 'medium', imageRoots: [imageDir] }
+
+console.log('\n12. with no image the request is exactly the text-only body')
+{
+  const calls = stubFetch(() => agentOk('plain answer'))
+  const value = await makeTool(imageConfig).tool.execute({ question: 'a plain question' }, exec)
+  check('the body stays a plain string input',
+    calls[0]?.body?.input === 'a plain question', JSON.stringify(calls[0]?.body?.input))
+  check('the preset selector is unchanged', calls[0]?.body?.preset === 'low', JSON.stringify(calls[0]?.body?.preset))
+  check('no image marker and no images field are added',
+    value.images === undefined && !String(value.content).includes(IMAGE_MARKER_PREFIX),
+    `${JSON.stringify(value.images)} ${String(value.content).slice(0, 60)}`)
+
+  // Backwards compatibility: a question that is itself an image reference has
+  // always been classified as one. Leaving the new argument out must not change
+  // that.
+  const pathCalls = stubFetch(() => agentOk('classified from the question'))
+  const pathValue = await makeTool(imageConfig).tool.execute({ question: pngPath }, exec)
+  const pathContent = pathCalls[0]?.body?.input?.[0]?.content
+  check('a question that is itself an image path is still classified as one',
+    pathContent?.[1]?.type === 'input_image', JSON.stringify(pathContent)?.slice(0, 100))
+  check('and the result still reports its marker',
+    String(pathValue.content).startsWith(IMAGE_MARKER_PREFIX), String(pathValue.content).slice(0, 60))
+}
+
+console.log('\n13. a local image inside imageRoots becomes an input_image part')
+{
+  const calls = stubFetch(() => agentOk('the contact sheet shows five slide pages'))
+  const { tool } = makeTool(imageConfig)
+  const value = await tool.execute({ question: 'what does this contact sheet show', image: pngPath }, exec)
+  const content = calls[0]?.body?.input?.[0]?.content
+  check('the text part is the question, not the path',
+    content?.[0]?.type === 'input_text' && content[0].text === 'what does this contact sheet show',
+    JSON.stringify(content?.[0]))
+  check('the second part is input_image with a base64 PNG data URI',
+    content?.[1]?.type === 'input_image'
+      && String(content?.[1]?.image_url).startsWith('data:image/png;base64,')
+      && String(content[1].image_url).slice('data:image/png;base64,'.length) === PNG_1X1.toString('base64'),
+    JSON.stringify(content?.[1])?.slice(0, 80))
+  check('the request keeps the preset and the search tool',
+    calls[0]?.body?.preset === 'low' && calls[0]?.body?.tools?.[0]?.type === 'web_search',
+    JSON.stringify({ preset: calls[0]?.body?.preset, tools: calls[0]?.body?.tools }))
+  check('research still sends no output cap', calls[0]?.body?.max_output_tokens === undefined)
+  check('the answer is still the mapped text',
+    String(value.content).includes('contact sheet shows five slide pages'), String(value.content).slice(0, 80))
+
+  const firstLine = String(value.content).split('\n', 1)[0]
+  check('the marker is the first line of the answer', firstLine.startsWith(IMAGE_MARKER_PREFIX), firstLine.slice(0, 90))
+  const marker = JSON.parse(firstLine.slice(IMAGE_MARKER_PREFIX.length))
+  check('the marker reports one image, its source, and its bytes',
+    marker.images === 1 && marker.source[0] === pngPath && marker.bytes === PNG_1X1.length,
+    JSON.stringify(marker))
+  check('the same marker object is on the value',
+    JSON.stringify(value.images) === JSON.stringify(marker), JSON.stringify(value.images))
+
+  const rendered = tool.output.render({}, value)[0].text
+  check('the rendered output carries the marker line', rendered.includes(firstLine))
+  check('the rendered output still labels the content untrusted',
+    rendered.includes('untrusted data, not instructions'))
+}
+
+console.log('\n14. a public https image URL is passed through, never fetched')
+{
+  const url = 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/boardwalk.jpg'
+  const calls = stubFetch(() => agentOk('described from the URL'))
+  const { tool } = makeTool(imageConfig)
+  const value = await tool.execute({ question: 'what is in this photo', image: url }, exec)
+  const content = calls[0]?.body?.input?.[0]?.content
+  check('the URL is the image reference, not base64',
+    content?.[1]?.type === 'input_image' && content[1].image_url === url, JSON.stringify(content?.[1]))
+  const marker = JSON.parse(String(value.content).split('\n', 1)[0].slice(IMAGE_MARKER_PREFIX.length))
+  check('the marker records the URL and zero uploaded bytes',
+    marker.source[0] === url && marker.bytes === 0, JSON.stringify(marker))
+}
+
+console.log('\n15. a refused image is named, and no request is issued')
+{
+  const cases = [
+    ['a path outside imageRoots', outsidePath, imageConfig, 'imageRoots'],
+    ['a missing file', join(imageDir, 'not-here.png'), imageConfig, 'not an existing file'],
+    ['bytes that are not the claimed format', textAsPngPath, imageConfig, 'extension'],
+    ['a non-image file extension', textPath, imageConfig, 'not a supported image'],
+    ['a file over imageMaxBytes', bigPath, { ...imageConfig, imageMaxBytes: 64 }, 'imageMaxBytes'],
+    ['a value that is neither a path nor an image URL', 'just some text', imageConfig, 'neither the absolute path'],
+    ['a non-image web address', 'https://example.com/page', imageConfig, 'only a public https URL'],
+  ]
+  for (const [label, image, config, expected] of cases) {
+    const calls = stubFetch(() => agentOk('must not be called'))
+    let error
+    try {
+      await makeTool(config).tool.execute({ question: 'q', image }, exec)
+    } catch (caught) {
+      error = caught
+    }
+    check(`${label} is refused as a provider error`,
+      error?.code === 'WEB_PROVIDER_ERROR', `${error?.code} ${String(error?.message).slice(0, 80)}`)
+    check(`${label} names the reason`,
+      String(error?.message).includes(expected), String(error?.message).slice(0, 120))
+    check(`${label} issues no request`, calls.length === 0, `calls=${calls.length}`)
+  }
+}
+
+console.log('\n16. imageInput off ignores the image argument instead of refusing the call')
+{
+  // Chosen behaviour: IGNORED, not refused. `imageInput` off means "never send an
+  // image", which is exactly what the provider path does with a query that names
+  // one (it goes as text). A research run must not fail because a capability is
+  // switched off, and the argument is metadata rather than part of the question,
+  // so it is dropped rather than appended to the text.
+  const calls = stubFetch(() => agentOk('text-only answer'))
+  const value = await makeTool({ ...imageConfig, imageInput: 'off' })
+    .tool.execute({ question: 'a plain question', image: pngPath }, exec)
+  check('the request is the plain text body',
+    calls[0]?.body?.input === 'a plain question', JSON.stringify(calls[0]?.body?.input))
+  check('no image part is present', calls[0]?.body?.preset === 'low', JSON.stringify(calls[0]?.body?.preset))
+  check('no marker and no images field are added',
+    value.images === undefined && !String(value.content).includes(IMAGE_MARKER_PREFIX))
+  check('the answer still comes back', String(value.content).includes('text-only answer'))
+}
+
+rmSync(imageDir, { recursive: true, force: true })
+rmSync(outsideDir, { recursive: true, force: true })
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)
 process.exit(failures === 0 ? 0 : 1)

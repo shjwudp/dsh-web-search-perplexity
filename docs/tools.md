@@ -8,7 +8,7 @@ and in what you should ask them.
 | | `web_search` | `perplexity_research` |
 |---|---|---|
 | Budget | `tool-web.searchTimeoutMs` (60 s under the shipped presets) | `researchTimeoutMs` (default 30 minutes) |
-| Input | 1–4 queries | one focused question, plus a depth |
+| Input | 1–4 queries | one focused question, an optional depth, and an optional image |
 | Preset | the configured one | chosen by `depth` |
 | Output budget | `maxTokens` (`max_output_tokens`) | the preset's own (128000 for `medium`/`high`); `maxTokens` does **not** apply |
 | Backend | Agent or Search API | Agent API only |
@@ -47,6 +47,45 @@ uncapped `high` run took ~5 minutes and spent 8 343–11 054 output tokens, wher
 `low` answers in seconds. Ask for `medium` when the question genuinely needs
 several rounds, `high` when it is exhaustive, and `wide` when the answer needs a
 large collection. A deployment can change the default with `researchDepth`.
+
+## Researching an image
+
+`perplexity_research` takes an optional `image` argument, separate from the
+question:
+
+```js
+perplexity_research({ question: 'what does this contact sheet show', image: '/home/me/shots/contact.png' })
+```
+
+| `image` value | Behaviour |
+|---|---|
+| An absolute path of a PNG/JPEG/GIF/WEBP file inside `imageRoots` and within `imageMaxBytes` | Read and sent as a base64 `input_image` part |
+| A public `https://` URL whose path ends in `.png`/`.jpg`/`.jpeg`/`.gif`/`.webp` | Passed through as the image URL; Perplexity fetches it, this plugin does not |
+| A path outside `imageRoots` | Refused before any read; the message names `imageRoots` |
+| A file above `imageMaxBytes` | Refused before it is read |
+| A file whose bytes are not the format its extension claims, or a non-image extension | Refused; the message names the format |
+| A path that does not exist, or a value that is neither a path nor an image URL | Refused; it did not silently become text |
+| Omitted | The call is exactly what it was before: text-only research |
+| Present while `imageInput` is off | Ignored, not refused: no image is uploaded and the question runs as text |
+
+The read guards, the byte sniff, the content parts, and the `[IMAGE]` marker are
+the same code the provider path uses (`src/image.js`), so the two cannot drift
+about what a refusal is. When an image is attached, the first line of the answer
+is the marker:
+
+```
+[IMAGE] {"images":1,"source":["/home/me/shots/contact.png"],"bytes":48211}
+```
+
+**Why this lives on the research branch.** `web_search` reaches this plugin
+through the `ctx.web` seam, and in this deployment the base patch pins
+`searchProvider: deepseek-official`, so the plugin's own provider is never
+selected and `dsh-tool-web` gives it nothing but `request.query`. The
+`perplexity_research` tool registers itself with `ctx.tools` and calls
+`/v1/agent` directly, bypassing the seam, so its `image` argument is the only
+way to attach an image here without changing the global search provider for
+every session. It is deliberately not implemented by changing `searchProvider`:
+that would migrate the default search backend and its cost attribution.
 
 ## Why research is not capped by `maxTokens`
 

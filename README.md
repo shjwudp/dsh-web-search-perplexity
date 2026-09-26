@@ -33,8 +33,11 @@ The skill is guidance, not a call — it never reaches Perplexity itself.
 - **A second backend when you want raw hits.** Set `searchProvider` and the same
   `web_search` tool is served by Perplexity's Search API instead: ranked results with
   domain, language, country, date, and recency filters.
-- **Images work.** A query naming a local image file or a public image URL is sent to
-  Perplexity as an image, so "what is wrong with this board" is a supported question.
+- **Images work.** `perplexity_research` takes an optional `image` — the absolute
+  path of a local image file, or a public image URL — alongside the question, so
+  "what is wrong with this board" is a supported question. Where the plugin's own
+  `web_search` provider is the selected one, a query naming an image is sent to
+  Perplexity as an image too.
 - **Failures say what happened.** A rate limit, a connection failure, and a backend that
   researched but returned no answer are three distinct classes, each naming what a
   reader needs to decide what to do next.
@@ -91,7 +94,7 @@ backends are in [configuration](docs/configuration.md).
 | `searchProvider` | `''` | Blank or `perplexity` = Agent API; `perplexity-search` = Search API |
 | `researchDepth` | `low` | Default depth for `perplexity_research` |
 | `softTimeoutMs` | derived from `preset` | Deadline before one degraded retry; `0` disables it |
-| `imageInput` | enabled | Set to `off` to send image paths as ordinary text |
+| `imageInput` | enabled | Only `off`/`false`/`0` disables it; off ignores the research tool's `image` argument and sends image paths as text |
 
 ## Use it
 
@@ -105,6 +108,14 @@ The model chooses the tool; nothing is configured per call.
 
   ```js
   perplexity_research({ question: 'Which EU AI Act obligations apply to GPAI providers from 2026?', depth: 'medium' })
+  ```
+
+- A question about what an image shows goes to `perplexity_research` with its optional
+  `image` argument, which leaves the question as the text question and the global
+  search provider untouched:
+
+  ```js
+  perplexity_research({ question: 'what does this contact sheet show', image: '/home/me/shots/contact.png' })
   ```
 
 ## Compatibility

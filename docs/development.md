@@ -51,8 +51,7 @@ a stale copy fails the command instead of surfacing at the next DSH start. Set
 where `@deepseek-ai/schemastery` and `@deepseek-ai/dsh-web` cannot be found, and it
 fails to load with `ERR_MODULE_NOT_FOUND`.
 
-A change to `src/index.js` needs a DSH restart, because the host half is loaded per
-process. `src/client.js` is re-served to the browser, so a reload is enough.
+A change to any host module (`src/index.js`, `src/image.js`, `src/shared.js`, `src/research.js`, `src/agent-run.js`, `src/search-api.js`, `src/skill.js`) needs a DSH restart, because the host half is loaded per process. `src/client.js` is re-served to the browser, so a reload is enough. A change to the tool registration in `src/research.js` only becomes live when the host reloads the plugin: the tool is registered at startup, so a running session keeps the old definition until then.
 
 ## Localization
 

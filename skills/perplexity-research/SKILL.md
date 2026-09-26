@@ -47,12 +47,39 @@ or edit content already provided in the conversation or repository.
 
 ## Researching an image
 
-The Perplexity provider accepts an image as a query. Pass either
+There are two ways to put an image in front of Perplexity. Which one is
+available depends on the deployment.
+
+### `perplexity_research` takes an explicit `image` argument
+
+`perplexity_research` accepts an optional `image` argument, separate from the
+question, so the question stays the text question:
+
+```
+perplexity_research({
+  question: "identify this board and its documented pinout",
+  image: "C:/Users/me/Pictures/board.png",
+})
+```
+
+The argument accepts either
 
 - a public `https://` image URL whose path ends in `.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`, or
-- the absolute path of a local image file,
+- the absolute path of a local image file.
 
-as the item in `web_search`'s `queries` array, and the plugin sends it to
+Use this branch when the deployment pins the harness's global search provider to
+another backend — the DSH base patch pins `searchProvider: deepseek-official` —
+because the plugin's own `web_search` provider is then never selected. The
+research tool registers itself and calls Perplexity directly, so it is unaffected
+by that pin; it is the only branch on which this plugin's image input is
+reachable in such a deployment. A call with no `image` is unchanged: text-only
+research behaves exactly as before.
+
+### `web_search` accepts an image only as a query string
+
+`dsh-tool-web` hands a provider nothing but `request.query`, so when the plugin's
+provider *is* the selected one, an image reaches it as text. Pass either form
+above as the item in `web_search`'s `queries` array, and the plugin sends it to
 Perplexity as the image to analyze. A second query in the same call is used as
 the text question; with no other query, the plugin asks for an analysis of what
 the image shows.
@@ -61,21 +88,20 @@ the image shows.
 web_search({ queries: ["C:/Users/me/Pictures/board.png", "identify this board and its documented pinout"] })
 ```
 
-Rules that matter:
+Rules that matter to both branches:
 
 1. The question decides the answer's usefulness. Name the entities and the
    decision, not just "what is this".
-2. Only images are read. A path whose bytes are not PNG/JPEG/GIF/WEBP is
+2. Only images are read. A file whose bytes are not PNG/JPEG/GIF/WEBP is
    refused with an error, and a path outside the deployment's configured
    `imageRoots` is refused before any read. Do not try to work around a refusal
    by renaming a file.
 3. An image request is slower than a text search: it uploads the image and then
-   reads it, so it gets a larger deadline than the same query as text. It uses
-   the *same* model selector as a text request — the configured preset when there
-   is one, otherwise the configured model — because a preset's own model reads
-   images correctly, and one selector means an image call cannot disagree with a
-   text call about which model answers. Prefer one image with one narrow question
-   over several images per call.
+   reads it. It uses the *same* model selector as a text request — the configured
+   preset when there is one, otherwise the configured model — because a preset's
+   own model reads images correctly, and one selector means an image call cannot
+   disagree with a text call about which model answers. Prefer one image with one
+   narrow question over several images per call.
 4. A URL image is fetched by Perplexity, not by the harness. When its fetcher
    cannot retrieve the URL — a stale thumbnail path, a host that blocks
    hotlinking, an expired signed link — the whole request fails with
@@ -89,7 +115,11 @@ Rules that matter:
 
    Check it before trusting the answer: it confirms which image the provider
    analyzed. `source` echoes the URL when the image came from the web.
-6. Never send an image that contains secrets, private screenshots, customer
+6. If image input is switched off (`imageInput` set to `off`/`false`/`0`), the
+   `perplexity_research` `image` argument is ignored rather than refused: no
+   image is uploaded and the call runs as text. Do not smuggle an image in by
+   instead putting its path in the question — the same switch governs that path.
+7. Never send an image that contains secrets, private screenshots, customer
    data, or unreleased material to the external API. A screenshot of a private
    repository or an internal dashboard stays local.
 
@@ -128,6 +158,9 @@ for a question that needs many sources or many rounds of reading.
   asked for exhaustive coverage, and `wide` (`wide-research`, for large
   collections — ask for it explicitly, it runs for minutes). Depth is not free:
   an uncapped `high` call takes minutes and costs several times a `low` one.
+- Use `perplexity_research` with its `image` argument for a visual review: pass
+  the image and a narrow question about it, and leave the global search provider
+  alone.
 - One research call replaces several search calls. Do not run a broad question as
   a batch of `web_search` calls and then also as research; pick one.
 - A research call is synchronous: it returns when the research finishes and
