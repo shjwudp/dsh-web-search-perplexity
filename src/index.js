@@ -249,9 +249,11 @@ const Config = z.object({
   softTimeoutMs: z.number().step(1).min(0),
   fallbackPreset: z.string().default(DEFAULT_FALLBACK_PRESET),
   // Blank enables image input; only the literal "off"/"false"/"0" disables it,
-  // so a cleared field cannot silently change what the provider sends. The rule
-  // itself is `isImageInputEnabled` in `./shared.js` — the one place that
-  // decides, called by the request path and by what the settings UI exposes.
+  // so a cleared field cannot silently change what the provider sends. This
+  // governs only a query that is ITSELF an image path or URL; the research
+  // tool's explicit `image` argument does not consult it. The rule itself is
+  // `isImageInputEnabled` in `./shared.js` — the one place that decides, called
+  // by the request path and by what the settings UI exposes.
   imageInput: z.string().default(''),
   imageMaxBytes: z.number().step(1).min(1).default(DEFAULT_IMAGE_MAX_BYTES),
   imageRoots: z.array(z.string()).default([]),

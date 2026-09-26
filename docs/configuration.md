@@ -19,7 +19,7 @@ effect on the next DSH start.
 | `searchRecency` | unset | Recency window: `day`, `week`, `month`, `year`. Unset sends no filter. `hour` is Search API only |
 | `softTimeoutMs` | per preset, or 40 s for the Search API | One deadline for both backends. Unset = derived from `preset` (`fast`/`low` `12000`; `medium`/`high`/`xhigh`/`wide-research`/unset `40000`). `0` disables it. See [timeouts](timeouts.md) |
 | `fallbackPreset` | `fast` | Preset for the single degraded retry (any preset except `wide-research`) |
-| `imageInput` | enabled | Image input on both paths. Only the literal `off`/`false`/`0` disables it; off ignores `perplexity_research`'s `image` argument and sends an image query as text |
+| `imageInput` | enabled | Governs the implicit case only: whether a query that is itself an image path/URL is treated as an image. Only the literal `off`/`false`/`0` disables it. `perplexity_research`'s explicit `image` argument is not gated by it |
 | `imageMaxBytes` | `10485760` | Per-image byte ceiling; an oversized image is refused before it is read |
 | `imageRoots` | `[]` (no restriction) | Directory allowlist for local image reads; a path outside every entry is refused. Applies to `web_search` and `perplexity_research`. See [images](images.md) |
 | `researchTimeoutMs` | `1800000` | Budget for one `perplexity_research` call, independent of `tool-web`'s search budget. `0` declares no deadline. **Restart** |

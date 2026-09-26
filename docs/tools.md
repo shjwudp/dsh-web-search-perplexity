@@ -65,8 +65,15 @@ perplexity_research({ question: 'what does this contact sheet show', image: '/ho
 | A file above `imageMaxBytes` | Refused before it is read |
 | A file whose bytes are not the format its extension claims, or a non-image extension | Refused; the message names the format |
 | A path that does not exist, or a value that is neither a path nor an image URL | Refused; it did not silently become text |
-| Omitted | The call is exactly what it was before: text-only research |
-| Present while `imageInput` is off | Ignored, not refused: no image is uploaded and the question runs as text |
+| Omitted | The call is exactly what it was before: text-only research, unless the question itself is an image path/URL |
+| Omitted, and the question itself is an image path/URL | Treated as an image only when `imageInput` is on (blank/absent); `off`/`false`/`0` sends it as text |
+| Present while `imageInput` is off | **Still attached.** `imageInput` governs only the implicit case above; it does not gate this explicit argument, and the read guards still apply |
+
+The `imageInput` setting is therefore not a way to disable this argument. An image
+asked for through `image` is always attached when it is a legitimate image; the
+guards in the table are the security boundary, and `imageRoots` is never
+bypassable. `imageInput` only decides whether a question whose own text is an
+image path or URL is treated as one, exactly as it does for `web_search`.
 
 The read guards, the byte sniff, the content parts, and the `[IMAGE]` marker are
 the same code the provider path uses (`src/image.js`), so the two cannot drift

@@ -30,7 +30,9 @@ window.__ModuleLoader__.load({
        * resolves only the declared externals, so it cannot import the host module
        * — the same reason `AGENT_DEFAULT_MODEL` above is repeated here.
        * `test/image-input.test.mjs` asserts this copy and the host function agree
-       * on every value, so the two cannot drift apart silently.
+       * on every value, so the two cannot drift apart silently. The decision only
+       * scopes the note shown for the switch: it governs a query that is itself an
+       * image path or URL, not the research tool's explicit `image` argument.
        */
       const IMAGE_INPUT_DISABLED_VALUES = ['off', 'false', '0']
       function isImageInputEnabled(value) {
@@ -90,9 +92,13 @@ window.__ModuleLoader__.load({
           'note.searchDate': '按发布时间窗口收窄结果，格式 MM/DD/YYYY；留空表示不限。',
           'imageMode.on': '开启',
           'imageMode.off': '关闭',
-          'note.imageInput': '开启后，把本地图片的绝对路径或公开的 https 图片地址当作一条查询传给 web_search，'
+          'note.imageInput': '开启后，当查询本身是本地图片的绝对路径或公开的 https 图片地址时，'
             + '该请求会把图片连同文字问题一并发给 Perplexity 做联网研究。只有扩展名为图片、且字节确实是 '
-            + 'PNG/JPEG/GIF/WEBP 的文件才会被读取；其它文件一律拒绝，不会外发。',
+            + 'PNG/JPEG/GIF/WEBP 的文件才会被读取；其它文件一律拒绝，不会外发。'
+            + '该开关只管这种情况：perplexity_research 工具显式传入的 image 参数不受它影响，'
+            + '合法图片一定会附带发送；下面的目录白名单与字节上限对两者都生效。',
+          'note.imageInputOff': '已关闭：查询文本本身是图片路径或地址时，按纯文本发送；'
+            + 'perplexity_research 显式 image 参数传入的合法图片仍会附带发送。',
           'note.imageRoots': '逗号分隔的目录白名单；留空表示不限制。填了以后，只有这些目录内的图片会被读取。',
           'note.imageModelFollows': '图片沿用你配置的预设（或模型）。预设自带的模型本身就能识图；'
             + '若未配置预设，请确保所选模型能看图，否则带图请求会答错而不是报错。',
@@ -193,10 +199,14 @@ window.__ModuleLoader__.load({
           'note.searchDate': 'Narrow results by publication window, MM/DD/YYYY; empty means no bound.',
           'imageMode.on': 'Enabled',
           'imageMode.off': 'Disabled',
-          'note.imageInput': 'When enabled, a query that is an absolute local image path or a public https image '
-            + 'URL is sent to Perplexity as that image plus the text question, for web-grounded analysis. Only files '
-            + 'whose extension names an image and whose bytes really are PNG/JPEG/GIF/WEBP are read; anything else is '
-            + 'refused rather than sent.',
+          'note.imageInput': 'When enabled, a query that is itself an absolute local image path or a public '
+            + 'https image URL is sent to Perplexity as that image plus the text question, for web-grounded '
+            + 'analysis. Only files whose extension names an image and whose bytes really are PNG/JPEG/GIF/WEBP '
+            + 'are read; anything else is refused rather than sent. This switch governs only that case: the '
+            + 'perplexity_research tool\'s explicit image argument is not gated by it, and a legitimate image '
+            + 'there is always attached. The directory allowlist and byte ceiling below apply to both.',
+          'note.imageInputOff': 'Off: a question whose own text is an image path or URL is sent as plain text. A '
+            + 'legitimate image passed to perplexity_research\'s explicit image argument is still attached.',
           'note.imageRoots': 'Comma-separated directory allowlist; empty means no restriction.',
           'note.imageModelFollows': 'Images use your configured preset (or model); a preset\''
             + 's own model already reads images. With no preset set, pick a model that can read images, '
@@ -1099,15 +1109,20 @@ window.__ModuleLoader__.load({
                     h(Field, { t, label: t('field.softTimeoutMs'), field: 'softTimeoutMs', state: state.softTimeoutMs, disabled, edit: props.edit, placeholder: t('placeholder.presetDefault') }),
                     h('div', { style: styles.note }, t('note.softDeadline')),
                     h(SelectField, { t, label: t('field.fallbackPreset'), field: 'fallbackPreset', state: state.fallbackPreset, disabled, edit: props.edit, options: FALLBACK_PRESET_OPTIONS }),
-                    isImageInputEnabled(state.imageInput.text)
-                      ? h('div', null,
-                        h('div', { style: styles.note }, t('note.imageModelFollows')),
-                        h(Field, { t, label: t('field.imageMaxBytes'), field: 'imageMaxBytes', state: state.imageMaxBytes, disabled, edit: props.edit, placeholder: t('placeholder.imageMaxBytes') }),
-                        h(Field, { t, label: t('field.imageRoots'), field: 'imageRoots', state: state.imageRoots, disabled, edit: props.edit, placeholder: t('placeholder.imageRoots') }),
-                        h('div', { style: styles.note }, t('note.imageInput')),
-                        h('div', { style: styles.note }, t('note.imageRoots')),
-                      )
-                      : null,
+                    // The read guards and their ceiling are shared with the research
+                    // tool's explicit `image` argument, which `imageInput` does not
+                    // govern, so they stay visible whatever it is set to. Only the
+                    // off-specific clarification below follows the switch.
+                    h('div', null,
+                      h('div', { style: styles.note }, t('note.imageModelFollows')),
+                      h(Field, { t, label: t('field.imageMaxBytes'), field: 'imageMaxBytes', state: state.imageMaxBytes, disabled, edit: props.edit, placeholder: t('placeholder.imageMaxBytes') }),
+                      h(Field, { t, label: t('field.imageRoots'), field: 'imageRoots', state: state.imageRoots, disabled, edit: props.edit, placeholder: t('placeholder.imageRoots') }),
+                      h('div', { style: styles.note }, t('note.imageInput')),
+                      h('div', { style: styles.note }, t('note.imageRoots')),
+                      isImageInputEnabled(state.imageInput.text)
+                        ? null
+                        : h('div', { style: styles.note }, t('note.imageInputOff')),
+                    ),
                   ),
                 // Research settings sit outside the backend branch: the research
                 // tool always runs through the Agent API, whatever `searchProvider`

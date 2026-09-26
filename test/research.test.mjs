@@ -9,7 +9,9 @@
  *
  * They also pin the tool's optional `image` argument: the request shape it
  * builds, the read guards it shares with the provider path (`imageRoots`,
- * `imageMaxBytes`, the byte sniff), and what `imageInput` off does to it. Every
+ * `imageMaxBytes`, the byte sniff), and the fact that `imageInput` does not gate
+ * it (the switch still governs only the implicit path — a question that is itself
+ * an image path or URL). Every
  * local-image case writes its own file under the OS temp directory and declares
  * that directory in `imageRoots`, so nothing depends on the developer's home
  * directory.
@@ -244,6 +246,10 @@ console.log('\n3. the tool schema offers the documented parameters')
   check('the image description names both accepted forms and a refusal',
     params.properties.image.description.includes('https') && params.properties.image.description.includes('imageRoots'),
     params.properties.image.description.slice(0, 120))
+  check('the image description no longer claims imageInput off ignores the argument',
+    params.properties.image.description.includes('imageInput')
+      && !/ignored|switched off/i.test(params.properties.image.description),
+    params.properties.image.description.slice(-180))
   check('the image marker is declared on the output, but not required',
     tool.output.schema.properties.images !== undefined
       && tool.output.schema.required?.includes('images') !== true,
@@ -750,22 +756,74 @@ console.log('\n15. a refused image is named, and no request is issued')
   }
 }
 
-console.log('\n16. imageInput off ignores the image argument instead of refusing the call')
+console.log('\n16. imageInput off does NOT gate the explicit image argument')
 {
-  // Chosen behaviour: IGNORED, not refused. `imageInput` off means "never send an
-  // image", which is exactly what the provider path does with a query that names
-  // one (it goes as text). A research run must not fail because a capability is
-  // switched off, and the argument is metadata rather than part of the question,
-  // so it is dropped rather than appended to the text.
-  const calls = stubFetch(() => agentOk('text-only answer'))
+  // User-decided semantics: an image asked for must attach. `imageInput` is not a
+  // way to disable the explicit argument — it governs only the implicit case
+  // (a question whose own text is an image path/URL) and nothing else. The hard
+  // guards (imageRoots, imageMaxBytes, the byte sniff) remain the boundary.
+  const calls = stubFetch(() => agentOk('answer about the image'))
   const value = await makeTool({ ...imageConfig, imageInput: 'off' })
-    .tool.execute({ question: 'a plain question', image: pngPath }, exec)
-  check('the request is the plain text body',
-    calls[0]?.body?.input === 'a plain question', JSON.stringify(calls[0]?.body?.input))
-  check('no image part is present', calls[0]?.body?.preset === 'low', JSON.stringify(calls[0]?.body?.preset))
+    .tool.execute({ question: 'what does this show', image: pngPath }, exec)
+  const content = calls[0]?.body?.input?.[0]?.content
+  check('the image part is built even though imageInput is off',
+    content?.[1]?.type === 'input_image'
+      && String(content?.[1]?.image_url).startsWith('data:image/png;base64,'),
+    JSON.stringify(content?.[1])?.slice(0, 80))
+  check('the text part is still the question',
+    content?.[0]?.type === 'input_text' && content[0].text === 'what does this show',
+    JSON.stringify(content?.[0]))
+  const marker = JSON.parse(String(value.content).split('\n', 1)[0].slice(IMAGE_MARKER_PREFIX.length))
+  check('the marker is present and correct',
+    marker.images === 1 && marker.source[0] === pngPath, JSON.stringify(marker))
+  check('the same marker object is on the value',
+    JSON.stringify(value.images) === JSON.stringify(marker), JSON.stringify(value.images))
+
+  // Every accepted "off" spelling behaves the same way.
+  for (const off of ['off', 'false', '0']) {
+    const offCalls = stubFetch(() => agentOk('answer'))
+    await makeTool({ ...imageConfig, imageInput: off })
+      .tool.execute({ question: 'q', image: pngPath }, exec)
+    check(`imageInput ${JSON.stringify(off)} still attaches the explicit image`,
+      offCalls[0]?.body?.input?.[0]?.content?.[1]?.type === 'input_image',
+      JSON.stringify(offCalls[0]?.body?.input?.[0]?.content?.[1])?.slice(0, 60))
+  }
+
+  // The guards are not weakened by the switch being off.
+  let refused
+  try {
+    await makeTool({ ...imageConfig, imageInput: 'off' }).tool.execute({ question: 'q', image: outsidePath }, exec)
+  } catch (caught) {
+    refused = caught
+  }
+  check('imageRoots still refuses an outside path while imageInput is off',
+    refused?.code === 'WEB_PROVIDER_ERROR' && String(refused?.message).includes('imageRoots'),
+    `${refused?.code} ${String(refused?.message).slice(0, 90)}`)
+}
+
+console.log('\n17. imageInput off still governs the IMPLICIT path')
+{
+  // With no `image` argument, a question whose own text is an image path is
+  // classified by `buildImageRequest`, which is where the switch applies. Off
+  // sends it as ordinary text — the same behaviour `web_search` has.
+  const calls = stubFetch(() => agentOk('text answer'))
+  const value = await makeTool({ ...imageConfig, imageInput: 'off' })
+    .tool.execute({ question: pngPath }, exec)
+  check('the path is sent as the plain text question',
+    calls[0]?.body?.input === pngPath, JSON.stringify(calls[0]?.body?.input))
+  check('no image message array is built',
+    calls[0]?.body?.preset === 'low' && typeof calls[0]?.body?.input === 'string',
+    JSON.stringify(calls[0]?.body?.input))
   check('no marker and no images field are added',
     value.images === undefined && !String(value.content).includes(IMAGE_MARKER_PREFIX))
-  check('the answer still comes back', String(value.content).includes('text-only answer'))
+
+  // On (the default), the same implicit question is still classified as an image.
+  // Inherited from §12 rather than assumed, so "off" is the only variable here.
+  const onCalls = stubFetch(() => agentOk('image answer'))
+  await makeTool({ ...imageConfig }).tool.execute({ question: pngPath }, exec)
+  check('with imageInput on the same question is still classified as an image',
+    onCalls[0]?.body?.input?.[0]?.content?.[1]?.type === 'input_image',
+    JSON.stringify(onCalls[0]?.body?.input)?.slice(0, 100))
 }
 
 rmSync(imageDir, { recursive: true, force: true })

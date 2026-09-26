@@ -73,7 +73,9 @@ because the plugin's own `web_search` provider is then never selected. The
 research tool registers itself and calls Perplexity directly, so it is unaffected
 by that pin; it is the only branch on which this plugin's image input is
 reachable in such a deployment. A call with no `image` is unchanged: text-only
-research behaves exactly as before.
+research behaves exactly as before. The `imageInput` setting does not gate this
+argument — an image asked for here is attached even when the switch is off; only
+the implicit case (a question that is itself an image path or URL) follows it.
 
 ### `web_search` accepts an image only as a query string
 
@@ -115,10 +117,14 @@ Rules that matter to both branches:
 
    Check it before trusting the answer: it confirms which image the provider
    analyzed. `source` echoes the URL when the image came from the web.
-6. If image input is switched off (`imageInput` set to `off`/`false`/`0`), the
-   `perplexity_research` `image` argument is ignored rather than refused: no
-   image is uploaded and the call runs as text. Do not smuggle an image in by
-   instead putting its path in the question — the same switch governs that path.
+6. The `imageInput` setting does **not** gate an explicit `image` argument: an
+   image asked for through `perplexity_research`'s `image` is always attached
+   when it is a legitimate image, whatever the switch says. `imageInput` only
+   governs the implicit case — a question whose own text is an image path or URL.
+   When it is off (`off`/`false`/`0`), such a question is sent as plain text, so
+   do not smuggle an image in by putting its path in the question; use the
+   `image` argument instead. The read guards (`imageRoots`, `imageMaxBytes`, the
+   byte sniff) apply to both forms and are never bypassable.
 7. Never send an image that contains secrets, private screenshots, customer
    data, or unreleased material to the external API. A screenshot of a private
    repository or an internal dashboard stays local.

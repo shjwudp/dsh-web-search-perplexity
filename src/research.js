@@ -30,7 +30,6 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { WebError } from '@deepseek-ai/dsh-web'
 import { runAgentRequest } from './agent-run.js'
-import { isImageInputEnabled } from './shared.js'
 
 /**
  * Prefix that keeps provider-controlled text visibly outside agent
@@ -282,8 +281,9 @@ function researchToolOptions(ctx, config, deps) {
           + '.png/.jpg/.jpeg/.gif/.webp. The image is sent to Perplexity alongside the question, so a '
           + 'visual review can be done without changing the global search provider. A local file '
           + 'outside the configured imageRoots, above imageMaxBytes, or whose bytes are not a '
-          + 'supported image is refused rather than sent. When image input is switched off, this '
-          + 'argument is ignored and the call runs as text.',
+          + 'supported image is refused rather than sent. The imageInput setting does not gate this '
+          + 'argument: it only decides whether a question whose own text is an image path or URL is '
+          + 'treated as an image.',
       },
     },
     output: {
@@ -367,25 +367,27 @@ function researchToolOptions(ctx, config, deps) {
       // provider path has no equivalent, because `dsh-tool-web` hands a
       // provider only `request.query`, so an image can only reach it as text.
       //
+      // The `imageInput` setting does NOT gate this argument. A caller that asks
+      // for an image gets one; the setting exists for the implicit case only.
+      //
       // When no image is named, the previous behaviour is unchanged: a question
-      // that is itself an image path or URL is still classified as one, which is
-      // how this tool has always accepted an image.
+      // that is itself an image path or URL is still classified as one (subject
+      // to `imageInput`), which is how this tool has always accepted an image.
       const requestedImage = typeof args?.image === 'string' ? args.image.trim() : ''
       let imageRequest
       if (requestedImage.length > 0) {
-        // `imageInput` off ignores the argument rather than refusing the call.
-        // The setting means "never send an image", and the provider path reads
-        // it the same way (an image path there is passed through as text); a
-        // research run must not fail because a capability is switched off. The
-        // argument is metadata, not part of the question, so it is not appended
-        // to the text either.
-        if (isImageInputEnabled(options.imageInput)) {
-          const image = await resolveImageAttachment(requestedImage, options)
-          imageRequest = imageRequestBody(question, [image])
-        }
+        // No `imageInput` test here on purpose: the user's decision is that an
+        // image asked for must attach. The hard guards are unchanged and are
+        // the security boundary — outside `imageRoots`, over `imageMaxBytes`,
+        // bytes that are not the claimed format, a missing file, and a value
+        // that is not an image reference are all still refused.
+        const image = await resolveImageAttachment(requestedImage, options)
+        imageRequest = imageRequestBody(question, [image])
       } else {
-        // Images work here too: a research question about a diagram is still one
-        // focused question, and the same guards apply.
+        // `imageInput` governs only this implicit case: a question whose own
+        // text is an image path or URL. Blank/absent means treat it as an image;
+        // `off`/`false`/`0` sends it as ordinary text. `buildImageRequest`
+        // applies that decision.
         imageRequest = await buildImageRequest([question], options)
       }
       const request = { query: question }

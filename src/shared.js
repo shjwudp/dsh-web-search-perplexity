@@ -40,6 +40,11 @@ export const IMAGE_INPUT_DISABLED_VALUES = ['off', 'false', '0']
  * the boolean the settings projection exposes — must call this instead of
  * re-deriving the rule, so the two cannot disagree as the rule evolves.
  *
+ * Scope: this decision governs the **implicit** case, where a query is itself an
+ * image path or URL. An explicit image argument does not consult it — the
+ * `perplexity_research` tool always attaches an image it was asked for, and the
+ * read guards (`imageRoots`, `imageMaxBytes`, the byte sniff) remain the boundary.
+ *
  * Absent (`undefined`/`null`) and blank (`''`, whitespace-only) mean **on**,
  * which is what the schema default (`z.string().default('')`), the settings UI
  * option `{ value: '', label imageMode.on }`, and the docs ("only the literal

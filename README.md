@@ -94,7 +94,7 @@ backends are in [configuration](docs/configuration.md).
 | `searchProvider` | `''` | Blank or `perplexity` = Agent API; `perplexity-search` = Search API |
 | `researchDepth` | `low` | Default depth for `perplexity_research` |
 | `softTimeoutMs` | derived from `preset` | Deadline before one degraded retry; `0` disables it |
-| `imageInput` | enabled | Only `off`/`false`/`0` disables it; off ignores the research tool's `image` argument and sends image paths as text |
+| `imageInput` | enabled | Governs the implicit case only: whether a question that is itself an image path/URL is treated as an image. Only `off`/`false`/`0` disables it. The research tool's explicit `image` argument is not gated by it |
 
 ## Use it
 
