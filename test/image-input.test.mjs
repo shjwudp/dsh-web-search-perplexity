@@ -16,7 +16,7 @@
  * visible rather than implied.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -60,8 +60,9 @@ if (process.env.PPLX_PLUGIN_ENTRY === undefined) {
     : '       (installed profile copy — NOT the working tree)')
 }
 
-const { apply, IMAGE_MARKER_PREFIX } = await import(MODULE)
-if (typeof apply !== 'function' || typeof IMAGE_MARKER_PREFIX !== 'string') {
+const { apply, IMAGE_MARKER_PREFIX, isImageInputEnabled } = await import(MODULE)
+if (typeof apply !== 'function' || typeof IMAGE_MARKER_PREFIX !== 'string'
+  || typeof isImageInputEnabled !== 'function') {
   console.error(`\nentry: ${MODULE}`)
   console.error('This copy does not export the image-input surface, so these tests would check')
   console.error('stale code. Sync the working tree into a profile (npm run sync:profile), or point')
@@ -459,6 +460,76 @@ try {
       String(calls[0]?.url).endsWith('/v1/agent'), calls[0]?.url)
     check('a choices/content body is not read as an answer',
       !String(result.content ?? '').includes('legacy answer'), String(result.content))
+  }
+  // ── 14. One decision function answers "is image input on?" ──────────────────
+  // The request path (`buildImageRequest`) and the boolean the settings
+  // projection exposes (`resolveOptions`) both go through the same exported
+  // `isImageInputEnabled`, so they cannot report different things. `''` and an
+  // absent setting mean ON — the schema default, the UI's `imageMode.on` option,
+  // and the docs all say only the literals `off`/`false`/`0` disable it.
+  console.log('\n14. the image-input decision is shared by the request path and the exposed boolean')
+  {
+    const cases = [
+      ['absent', undefined, true],
+      ['empty string', '', true],
+      ['blank spaces', '   ', true],
+      ['null', null, true],
+      ['on', 'on', true],
+      ['ON', 'ON', true],
+      ['  on  ', '  on  ', true],
+      ['true', 'true', true],
+      ['1', '1', true],
+      ['any other value', 'yes', true],
+      ['off', 'off', false],
+      ['OFF', 'OFF', false],
+      ['  off  ', '  off  ', false],
+      ['false', 'false', false],
+      ['False', 'False', false],
+      ['0', '0', false],
+      ['  0  ', '  0  ', false],
+    ]
+
+    for (const [label, value, expected] of cases) {
+      const exposed = isImageInputEnabled(value)
+      check(`the exposed boolean for ${label} is ${expected}`, exposed === expected, `got ${exposed}`)
+      check(`the decision is idempotent for ${label}`, isImageInputEnabled(exposed) === exposed)
+
+      const calls = stubFetch(() => agentOk('answer'))
+      const provider = makeProvider({ ...baseConfig, imageInput: value })
+      await provider.search({ query: pngPath, maxResults: 5 })
+      const content = calls[0]?.body?.input?.[0]?.content
+      const attached = Array.isArray(content) && content.some((part) => part.type === 'input_image')
+      check(`the request path agrees with the exposed boolean for ${label}`,
+        attached === exposed, `attached=${attached} exposed=${exposed}`)
+    }
+  }
+
+  // ── 15. The browser half carries the same decision ─────────────────────────
+  // The settings card cannot import the host module, so it repeats the function.
+  // These checks make the repetition safe: the two must agree on every value, and
+  // the card must call the function rather than compare the raw text itself.
+  console.log('\n15. the settings-card copy of the decision matches the host function')
+  {
+    const clientSource = readFileSync(join(repoRoot, 'src/client.js'), 'utf8')
+    const declaration = clientSource.indexOf('const IMAGE_INPUT_DISABLED_VALUES')
+    const functionStart = clientSource.indexOf('function isImageInputEnabled(value)')
+    const functionEnd = functionStart === -1 ? -1 : clientSource.indexOf('\n      }', functionStart)
+    check('the client defines the shared decision function',
+      declaration !== -1 && functionStart !== -1 && functionEnd !== -1)
+    check('the settings card no longer compares the raw setting text to "off"',
+      !clientSource.includes("state.imageInput.text !== 'off'"))
+    if (declaration !== -1 && functionStart !== -1 && functionEnd !== -1) {
+      const block = clientSource.slice(declaration, functionEnd + '\n      }'.length)
+      const clientDecision = new Function(`${block}\nreturn isImageInputEnabled`)()
+      for (const [label, value] of [
+        ['absent', undefined], ['empty string', ''], ['null', null], ['on', 'on'], ['ON', 'ON'],
+        ['off', 'off'], ['OFF', 'OFF'], ['false', 'false'], ['0', '0'], ['any other value', 'yes'],
+      ]) {
+        check(`the client and host agree for ${label}`,
+          clientDecision(value) === isImageInputEnabled(value),
+          `client=${clientDecision(value)} host=${isImageInputEnabled(value)}`)
+      }
+    }
   }
 } finally {
   rmSync(imageDir, { recursive: true, force: true })

@@ -24,6 +24,22 @@ window.__ModuleLoader__.load({
       const DEFAULT_API_KEY_REF = 'PERPLEXITY_API_KEY'
       const AGENT_DEFAULT_MODEL = 'openai/gpt-5.6-luna'
       /**
+       * The browser half of the one "is image input on?" decision, mirroring the
+       * host's `isImageInputEnabled` in `src/shared.js`. The client bundle is
+       * served to the browser through `window.__ModuleLoader__`, whose `require`
+       * resolves only the declared externals, so it cannot import the host module
+       * — the same reason `AGENT_DEFAULT_MODEL` above is repeated here.
+       * `test/image-input.test.mjs` asserts this copy and the host function agree
+       * on every value, so the two cannot drift apart silently.
+       */
+      const IMAGE_INPUT_DISABLED_VALUES = ['off', 'false', '0']
+      function isImageInputEnabled(value) {
+        if (value === undefined || value === null) return true
+        if (typeof value === 'boolean') return value
+        const text = String(value).trim().toLowerCase()
+        return text === '' || !IMAGE_INPUT_DISABLED_VALUES.includes(text)
+      }
+      /**
        * UI copy for the settings card. `zh` is complete and `en` mirrors it, as
        * `ctx.locale.register` requires every shipped locale for a namespace.
        * Values that are themselves identifiers (preset names, `day`/`month`,
@@ -1083,7 +1099,7 @@ window.__ModuleLoader__.load({
                     h(Field, { t, label: t('field.softTimeoutMs'), field: 'softTimeoutMs', state: state.softTimeoutMs, disabled, edit: props.edit, placeholder: t('placeholder.presetDefault') }),
                     h('div', { style: styles.note }, t('note.softDeadline')),
                     h(SelectField, { t, label: t('field.fallbackPreset'), field: 'fallbackPreset', state: state.fallbackPreset, disabled, edit: props.edit, options: FALLBACK_PRESET_OPTIONS }),
-                    state.imageInput.text !== 'off'
+                    isImageInputEnabled(state.imageInput.text)
                       ? h('div', null,
                         h('div', { style: styles.note }, t('note.imageModelFollows')),
                         h(Field, { t, label: t('field.imageMaxBytes'), field: 'imageMaxBytes', state: state.imageMaxBytes, disabled, edit: props.edit, placeholder: t('placeholder.imageMaxBytes') }),

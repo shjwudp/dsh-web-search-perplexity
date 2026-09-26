@@ -55,7 +55,7 @@ import { PERPLEXITY_RESEARCH_SKILL } from './skill.js'
 import { PerplexitySearchApiProvider, SEARCH_API_PROVIDER_ID } from './search-api.js'
 import { DEFAULT_RESEARCH_TIMEOUT_MS, applyResearchTool, researchTimeoutMs } from './research.js'
 import { AGENT_POLL_INTERVAL_SHORT_MS, AgentDeadlineError, runAgentRequest } from './agent-run.js'
-import { canParseURL, isAbortError, requestJson as postJson, resolveApiKey } from './shared.js'
+import { canParseURL, isAbortError, isImageInputEnabled, requestJson as postJson, resolveApiKey } from './shared.js'
 
 export const name = 'web-search-perplexity'
 // All three are required rather than probed: the plugin contributes the
@@ -64,6 +64,11 @@ export const name = 'web-search-perplexity'
 // the plugin says so instead of failing later on an undefined service.
 // `web` is the seam both search providers register into.
 export const inject = ['web', 'tools', 'systemPrompt']
+
+// The image-input decision lives in `./shared.js` so the browser half can carry
+// the same rule; re-exported here so this package's single entry point exposes
+// it and a test can assert the request path and the exposed boolean agree.
+export { IMAGE_INPUT_DISABLED_VALUES, isImageInputEnabled } from './shared.js'
 
 export {
   DEFAULT_RESEARCH_TIMEOUT_MS,
@@ -272,7 +277,9 @@ const Config = z.object({
   softTimeoutMs: z.number().step(1).min(0),
   fallbackPreset: z.string().default(DEFAULT_FALLBACK_PRESET),
   // Blank enables image input; only the literal "off"/"false"/"0" disables it,
-  // so a cleared field cannot silently change what the provider sends.
+  // so a cleared field cannot silently change what the provider sends. The rule
+  // itself is `isImageInputEnabled` in `./shared.js` — the one place that
+  // decides, called by the request path and by what the settings UI exposes.
   imageInput: z.string().default(''),
   imageMaxBytes: z.number().step(1).min(1).default(DEFAULT_IMAGE_MAX_BYTES),
   imageRoots: z.array(z.string()).default([]),
@@ -493,7 +500,11 @@ async function classifyImageQuery(query, options) {
  *   image.
  */
 async function buildImageRequest(queries, options) {
-  if (!options.imageInput) return undefined
+  // `options.imageInput` is already the boolean `resolveOptions` produced, but
+  // the decision function is applied again so a raw string is accepted too: the
+  // request path and the settings projection answer "is image input on?" the
+  // same way by construction rather than by two expressions happening to agree.
+  if (!isImageInputEnabled(options.imageInput)) return undefined
   const classified = []
   for (const query of queries) classified.push(await classifyImageQuery(query, options))
   const images = classified.filter((item) => item.kind === 'image')
@@ -587,9 +598,10 @@ function resolveOptions(ctx, config) {
   const softTimeoutMs = Number.isInteger(c.softTimeoutMs) && c.softTimeoutMs >= 0
     ? c.softTimeoutMs
     : defaultSoftTimeoutMsFor(preset)
-  // Image input is on unless it was explicitly switched off.
-  const imageInput = c.imageInput === undefined
-    || (typeof c.imageInput === 'string' && !['off', 'false', '0'].includes(c.imageInput.trim().toLowerCase()))
+  // Image input is on unless it was explicitly switched off. The rule lives in
+  // one place (`isImageInputEnabled`), so what the settings projection exposes
+  // cannot disagree with what the request path does.
+  const imageInput = isImageInputEnabled(c.imageInput)
   // An image request gets the text deadline plus the analysis margin, capped
   // where the degraded retry still fits the tool budget, and `0` stays `0` so
   // disabling the deadline disables it for images too. This is deliberately not

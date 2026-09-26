@@ -27,6 +27,40 @@ export const USER_AGENT = 'dsh-web-search-perplexity/0.1.7-rc.2'
 export const MAX_RETRY_WAIT_MS = 10_000
 
 /**
+ * Values that turn image input off, compared after `trim().toLowerCase()`.
+ * Kept as a named list so the decision function and its documentation cannot
+ * drift apart.
+ */
+export const IMAGE_INPUT_DISABLED_VALUES = ['off', 'false', '0']
+
+/**
+ * The single answer to "is image input on?".
+ *
+ * Every consumer — the request path that decides whether to attach an image and
+ * the boolean the settings projection exposes — must call this instead of
+ * re-deriving the rule, so the two cannot disagree as the rule evolves.
+ *
+ * Absent (`undefined`/`null`) and blank (`''`, whitespace-only) mean **on**,
+ * which is what the schema default (`z.string().default('')`), the settings UI
+ * option `{ value: '', label imageMode.on }`, and the docs ("only the literal
+ * `off`/`false`/`0` disables it") all say. Only those three literals, compared
+ * case-insensitively and after trimming, turn it off; any other value is on.
+ *
+ * Booleans pass through, and feeding the function its own output returns that
+ * output again, so it is safe to call on either the raw setting or the resolved
+ * boolean without the two disagreeing.
+ *
+ * @param value - the raw `imageInput` setting, or an already-resolved boolean.
+ * @returns whether image input is enabled.
+ */
+export function isImageInputEnabled(value) {
+  if (value === undefined || value === null) return true
+  if (typeof value === 'boolean') return value
+  const text = String(value).trim().toLowerCase()
+  return text === '' || !IMAGE_INPUT_DISABLED_VALUES.includes(text)
+}
+
+/**
  * True when `value` is an HTTPS URL. Only HTTPS is acceptable: every request
  * carries the API key in its Authorization header, so an `http://` base would
  * leak the credential in cleartext.
