@@ -49,7 +49,7 @@ async function chooseEntry() {
 
 const MODULE = await chooseEntry()
 console.log(`\nentry: ${MODULE}`)
-const { apply } = await import(MODULE)
+const { apply, Config, liveConfig, SETTINGS_NAMESPACE } = await import(MODULE)
 if (typeof apply !== 'function') {
   console.error('This copy does not export the host surface; sync the working tree first.')
   process.exit(1)
@@ -68,12 +68,16 @@ function check(name, condition, detail = '') {
 /**
  * Register the plugin against a minimal fake context.
  *
- * `installSection` is the one seam this test needs faithfully: it must resolve
- * the schema against the row config (which is how the `enabled` default reaches
- * `resolveOptions`) and call `onChange` on install and on every committed
- * change, because that callback is what re-applies the seam selection.
+ * DSH 0.2 hands a plugin its configuration as the Loader resolved it: `apply`
+ * receives a section of live references for the `volatile()` fields, and a
+ * committed settings edit **restarts** the plugin rather than patching the
+ * section in place. The harness therefore models a change as a second `load`:
+ * the previous registration is dropped and `apply` runs again, exactly as
+ * `Fiber.update()` does. That is what makes the release/restore round trip
+ * below a real regression test — an id released by one `apply` has to be
+ * restorable by the next one.
  *
- * @param options.config - the row config the settings section is based on.
+ * @param options.config - raw config of the row that mounts the plugin.
  * @param options.searchProviderId - what the seam already has configured, i.e.
  *   what the profile patch named. Stands in for a deployment that points
  *   `ctx.web` at some other provider entirely.
@@ -81,16 +85,8 @@ function check(name, condition, detail = '') {
 function makeHarness({ config = {}, searchProviderId = 'perplexity' } = {}) {
   const providers = []
   const tools = []
-  let resolved
-  let hooks
-  const settings = {
-    installSection(_owner, _ns, schema, entry, passed) {
-      hooks = passed
-      resolved = schema(entry ?? {})
-      passed.setSource(() => resolved)
-      passed.onChange()
-    },
-  }
+  let raw = { ...config }
+  let section
   const web = {
     searchProviderId,
     registerSearchProvider(provider) { providers.push(provider) },
@@ -99,32 +95,39 @@ function makeHarness({ config = {}, searchProviderId = 'perplexity' } = {}) {
   const systemPrompt = { section() {}, getSectionOrder: () => 100 }
   const ctx = {
     web,
-    settings,
     tools: toolsService,
     systemPrompt,
     get(name) {
       if (name === 'web') return web
       if (name === 'tools') return toolsService
       if (name === 'systemPrompt') return systemPrompt
-      if (name === 'settings') return settings
       return undefined
     },
     inject(_names, callback) { callback(ctx) },
     effect(fn) { return typeof fn === 'function' ? fn() : undefined },
   }
-  apply(ctx, config)
+  /** One plugin load with `raw` as the row config; the Loader resolves it first. */
+  const load = () => {
+    section = Config(raw)
+    providers.length = 0
+    tools.length = 0
+    apply(ctx, section)
+  }
+  load()
   return {
     web,
     providers,
-    agent: providers.find((provider) => provider.id === 'perplexity'),
-    searchApi: providers.find((provider) => provider.id === 'perplexity-search'),
-    research: tools.find((tool) => tool.name === 'perplexity_research'),
-    resolved: () => resolved,
-    /** Simulate one committed settings change, as the settings service would. */
+    /** The section as it currently stands, unwrapped from its references. */
+    resolved: () => liveConfig(section),
+    /** Simulate one committed settings change, which restarts the plugin. */
     commit(patch) {
-      resolved = { ...resolved, ...patch }
-      hooks.onChange()
+      raw = { ...raw, ...patch }
+      load()
     },
+    // Getters rather than captured values: a restart replaces both registrations.
+    get agent() { return providers.find((provider) => provider.id === 'perplexity') },
+    get searchApi() { return providers.find((provider) => provider.id === 'perplexity-search') },
+    get research() { return tools.find((tool) => tool.name === 'perplexity_research') },
   }
 }
 
@@ -218,6 +221,46 @@ console.log('\n6. perplexity_research refuses while the switch is off')
   check('re-enabling lifts the refusal', !enabledMessage.includes('is disabled'), enabledMessage)
   check('the call then fails for its own reason, not the switch',
     enabledMessage.includes('question'), enabledMessage)
+}
+
+// ── 7. The DSH 0.2 configuration contract ────────────────────────────────────
+// The port's load-bearing assumptions, pinned so a later edit cannot quietly
+// undo them: the module must export `Config` (DSH derives the entry's settings
+// page from the loaded module's `Config`), every field the plugin reads must be
+// `volatile()` (that is what resolves it into the live reference `liveConfig`
+// unwraps), and `apiKey` must NOT be — DSH's generated form renders exactly the
+// volatile fields, and a form write is persisted into the profile's
+// `cordis.patch.yml`, which is the one place this plugin promises never to put
+// the key. Section 4 is what fails if that split is ever flattened.
+console.log('\n7. the DSH 0.2 configuration contract')
+{
+  check('the module exports the schema DSH derives the settings page from',
+    Config !== undefined && typeof Config === 'function', typeof Config)
+  check('the export is a schemastery object schema',
+    Config?.type === 'object' && Config?.dict !== undefined, String(Config?.type))
+
+  const entries = Object.entries(Config.dict ?? {})
+  const volatileFields = entries.filter(([, field]) => field.meta?.volatile === true).map(([name]) => name)
+  const plainFields = entries.filter(([, field]) => field.meta?.volatile !== true).map(([name]) => name)
+  check('apiKey is the only field DSH\'s generated form must not render',
+    plainFields.length === 1 && plainFields[0] === 'apiKey', JSON.stringify(plainFields))
+  check('every other field is volatile, so the Loader hands apply a live reference',
+    volatileFields.length === entries.length - 1, JSON.stringify(plainFields))
+  check('the key field is still marked secret', Config.dict.apiKey.meta?.role === 'secret',
+    String(Config.dict.apiKey.meta?.role))
+
+  const section = Config({ baseURL: 'https://example.test', enabled: false })
+  check('a resolved field is a live reference, not a value',
+    typeof section.baseURL?.get === 'function')
+  const plain = liveConfig(section)
+  check('liveConfig unwraps the section into ordinary values',
+    plain.baseURL === 'https://example.test' && plain.enabled === false
+      && Number.isInteger(plain.maxTokens) && plain.maxTokens > 0,
+    JSON.stringify({ baseURL: plain.baseURL, enabled: plain.enabled, maxTokens: plain.maxTokens }))
+  check('liveConfig passes the non-volatile literal key through',
+    liveConfig(Config({ apiKey: 'literal' })).apiKey === 'literal')
+  check('the configuration namespace is the row id this package ships',
+    SETTINGS_NAMESPACE === 'web-search-perplexity', String(SETTINGS_NAMESPACE))
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)

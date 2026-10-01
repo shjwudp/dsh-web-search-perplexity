@@ -3,6 +3,83 @@
 Notable changes to `@shjwudp/dsh-web-search-perplexity`, newest first. Entries
 describe behaviour, not commits; the `v*` tags carry the full history.
 
+## v0.2.0-rc.1
+
+**Compatible with DSH 0.2.0-rc.2** (`@deepseek-ai/dsh-web` / `@deepseek-ai/dsh-tools`
+0.2.0-rc.2, `@deepseek-ai/schemastery` 3.18.4). Requires DSH **0.2.0-rc.2 or newer
+within 0.2.x**; use v0.1.7-rc.2 for DSH 0.1.x.
+
+A release candidate that ports the plugin to **DSH 0.2**, which replaced the
+per-plugin settings section with Loader-entry configuration. The plugin did not
+merely warn on 0.2.0-rc.2: its `apply()` threw
+`settingsCtx.settings.installSection is not a function` and the entry never
+activated, so neither the search providers nor `perplexity_research` existed.
+DSH 0.1.x is no longer supported by this line — the settings API it used is
+gone, and no compatibility branch was kept for it.
+
+### Changed
+
+- **Configuration is now the profile entry's config.** The plugin exports its
+  `Config` schema (DSH derives an entry's settings page from the loaded module's
+  `Config` export) and every field is `volatile()`, which is what resolves it
+  into a live reference the plugin reads through `liveConfig()`. The
+  `settings.installSection` call, the `setSource`/`onChange` hooks, and the
+  per-plugin namespace are all gone. A committed edit now restarts the entry, so
+  the `enabled` master switch is applied from the config each `apply` sees — and
+  the seam id it releases is remembered **beside `ctx.web`** rather than in
+  `apply`'s closure, because a restart would otherwise forget the id and could
+  never give it back.
+- **The settings card is one tab of Settings → Built-in plugins**, registered
+  into `settings.plugins.tab` and backed by `ctx.configForms.get(...)` instead of
+  the removed `settingsScope` / `settings.plugin.item` pair. `whileServed` keeps
+  the tab absent in a deployment that installed the package without composing its
+  row, rather than showing a page that can only say "unavailable". The card's
+  behaviour is otherwise unchanged: same fields, same Save/Discard model, same
+  write-only API key.
+- **`apiKey` is the one non-volatile field.** DSH's generated form renders
+  exactly the volatile fields and persists a form write into the profile's
+  `cordis.patch.yml`; leaving the literal key out of that form is what keeps the
+  plugin's existing promise that the key lives in the credentials domain and
+  never in a patch file. A hand-written `apiKey` in the patch is still honoured.
+- **Settings moved from `~/.dsh/settings.yaml` to the profile patch.** DSH 0.2
+  removed that document; a `web-search-perplexity` section in a surviving
+  `settings.yaml.imported` has to be restated as `config:` on the plugin's row in
+  `~/.dsh/profiles/<profile>/cordis.patch.yml`.
+- Peer dependencies moved to `^0.2.0-rc.2`, which is what DSH's compatibility
+  gate reads: the plugin now installs into a 0.2.0-rc.2 profile with no
+  exact-version exemption.
+
+### Fixed
+
+- **`apply()` threw `settingsCtx.settings.installSection is not a function` on
+  DSH 0.2**, leaving the entry unactivated and both `web_search` backends and
+  `perplexity_research` unregistered.
+- **The version gate rejected the package on DSH 0.2.0-rc.2** with
+  `peerDependencies {"@deepseek-ai/dsh-web":"^0.1.2-rc.1"}`.
+
+### Verification
+
+`npm test` — 11 suites, 0 failures; `npm run check` clean. Booted an isolated
+0.2.0-rc.2 profile with the plugin mounted: `stderr` is empty and every entry
+activates (a deliberately broken copy of the same tree prints
+`dsh: warning: 1 entry did not activate`, which is the signal being ruled out).
+The client half is composed into the served bundle.
+
+Verified live on DSH 0.2.0-rc.2, with the plugin mounted in a profile and a
+Perplexity key in the host environment:
+
+- `web_search` is served by this provider, and answered under the migrated
+  `preset: medium` / `softTimeoutMs: 40000` — the result carried this plugin's
+  own `[DEGRADED] {...}` marker, which no other provider emits.
+- `perplexity_research` answered, with the configured `researchDepth: medium`
+  visible as its default depth.
+- A committed settings edit reached the running plugin without a restart: setting
+  `enabled: false` made `perplexity_research` refuse within seconds, and
+  restoring it lifted the refusal.
+- Pinning `web.searchProvider` to a backend this plugin reports unusable made the
+  seam answer `configured web provider "perplexity" is registered but
+  unavailable`, confirming the selection is this plugin's.
+
 ## v0.1.7-rc.2
 
 A release candidate. It fixes saving the API key and adds a way to hand search

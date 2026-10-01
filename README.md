@@ -3,6 +3,10 @@
 A Perplexity-backed search provider for the DeepSeek Harness `ctx.web` seam. It gives
 a DSH agent quick web lookups, and a second tool for research that takes minutes.
 
+> **Compatible with DSH 0.2.0-rc.2.** Requires DSH 0.2.0-rc.2 or newer within 0.2.x
+> (DSH 0.2 replaced the settings API this plugin used); use `v0.1.7-rc.2` for DSH
+> 0.1.x. See [Compatibility](#compatibility).
+
 ## What it does
 
 <picture>
@@ -51,7 +55,7 @@ imports `@deepseek-ai/dsh-environment`, which is not published on the npm regist
 ## Install
 
 ```bash
-dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.1.7-rc.2
+dsh plugin --profile web add github:shjwudp/dsh-web-search-perplexity#v0.2.0-rc.1
 ```
 
 Tell the web seam to use the Perplexity provider in
@@ -67,8 +71,21 @@ Tell the web seam to use the Perplexity provider in
 The `web` profile ships with the model-facing tools disabled, so enable them in the
 same patch with `- id: tool-web, disabled: false`.
 
+The plugin's own settings are `config:` on its row in the same file — DSH 0.2 keeps
+plugin configuration there, so the row is where a value lives, not a `settings.yaml`:
+
+```yaml
+- id: web-search-perplexity
+  config:
+    preset: medium
+    maxTokens: 2048
+```
+
+Every key can also be edited in the web UI, at Settings → Built-in plugins →
+Perplexity web search.
+
 Set the API key where DSH will read it — in the terminal that starts DSH, or later in
-the web UI at Settings → Plugins → Plugin configuration → Perplexity web search:
+that same settings page (it is stored in the credentials domain, never in the patch):
 
 ```powershell
 # Windows PowerShell
@@ -127,10 +144,17 @@ The model chooses the tool; nothing is configured per call.
 - Needs a Perplexity API key: the `PERPLEXITY_API_KEY` environment variable, or one
   saved in the settings card.
 - Node ≥ 18. Peer dependencies `@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-web`, and
-  `@deepseek-ai/schemastery` are all optional and declared as `^0.1.2-rc.1` /
-  `^3.18.1-rc.1`; older `0.1.2-rc.x` hosts are within range.
-- Tested with **DSH 0.1.5-rc.1** (`@deepseek-ai/dsh-web` 0.1.5-rc.2,
-  `@deepseek-ai/schemastery` 3.18.2). The host version numbers are DSH's, not this
+  `@deepseek-ai/schemastery` are all optional and declared as `^0.2.0-rc.2` /
+  `^3.18.1-rc.1`. The `@deepseek-ai/dsh-*` ranges are what DSH's compatibility gate
+  reads, and it compares them against the **DSH runtime version**, so a profile on
+  0.2.0-rc.2 installs this package with no exact-version exemption.
+- **Requires DSH 0.2.0-rc.2 or newer within 0.2.x.** DSH 0.2 replaced the per-plugin
+  settings section (`settings.installSection`) with Loader-entry configuration plus
+  `ctx.configForms`, and removed the `settingsScope` / `settings.plugin.item` client
+  pair. There is no 0.1.x compatibility branch: on 0.1.x this version's `apply()`
+  fails and the entry never activates. Use `v0.1.7-rc.2` for DSH 0.1.x.
+- Tested with **DSH 0.2.0-rc.2** (`@deepseek-ai/dsh-web` 0.2.0-rc.2,
+  `@deepseek-ai/schemastery` 3.18.4). The host version numbers are DSH's, not this
   plugin's; this package's own versions are the `v*` tags.
 - Perplexity has replaced its Sonar Chat Completions API with the Agent API (Sonar
   stays supported until 2026-09-27), so there is no `apiMode` switch and no Sonar

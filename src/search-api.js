@@ -290,7 +290,7 @@ export class PerplexitySearchApiProvider {
     if (apiKey === undefined || apiKey.length === 0) {
       throw new WebError(
         'Perplexity API key is not configured. Set PERPLEXITY_API_KEY, '
-        + 'or open Settings → Plugins → Plugin configuration → Perplexity web search '
+        + 'or open Settings → Built-in plugins → Perplexity web search '
         + 'and save an API key there.',
         'WEB_PROVIDER_ERROR',
       )

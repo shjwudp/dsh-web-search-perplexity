@@ -97,12 +97,20 @@ console.log('\n2. registration wiring')
   const effectLabels = []
   const makeCtx = (overrides = {}) => ({
     slots: { inject() {}, register: () => () => {} },
-    settingsScope: {
-      bind: () => ({
+    // DSH 0.2 addresses a plugin's configuration by the Loader entry that mounts
+    // it, through `ctx.configForms`; `whileServed` runs the registration once the
+    // Host serves that entry's namespace.
+    configForms: {
+      get: () => ({
         getSnapshot: () => ({ status: 'ready', writable: true }),
         subscribe() {},
-        get: () => undefined,
+        set: async () => true,
+        unset: async () => true,
       }),
+      whileServed: (namespaces, register) => {
+        register(new Set(namespaces))
+        return () => {}
+      },
     },
     remote: { credentials: { describe: async () => ({ value: {} }) } },
     locale: {
@@ -130,7 +138,16 @@ console.log('\n2. registration wiring')
     JSON.stringify(registration?.locales))
   check('the registered zh dictionary is the declared one',
     registration?.dicts?.zh?.['card.title'] === DICTS.zh['card.title'])
-  check('registration rides ctx.effect so it is disposed with the plugin', effectLabels.length === 1, JSON.stringify(effectLabels))
+  check('the settings card is keyed by the same namespace',
+    effectLabels.includes('web-search-perplexity: settings tab'), JSON.stringify(effectLabels))
+  check('both the dictionaries and the card ride ctx.effect, so they are disposed with the plugin',
+    effectLabels.includes('web-search-perplexity: dictionaries')
+      && effectLabels.includes('web-search-perplexity: settings tab'),
+    JSON.stringify(effectLabels))
+  check('configForms is declared as an injected service',
+    Array.isArray(mod?.inject) && mod.inject.includes('configForms'), JSON.stringify(mod?.inject))
+  check('the retired settings-scope service is no longer injected',
+    Array.isArray(mod?.inject) && !mod.inject.includes('settingsScope'), JSON.stringify(mod?.inject))
 
   // A missing locale service must leave the card working, not throw.
   let threw = null

@@ -344,8 +344,8 @@ function researchToolOptions(ctx, config, deps) {
       // asked for the built-in search back.
       if (settings.enabled === false) {
         throw new WebError(
-          'Perplexity web search is disabled. Re-enable it in Settings → Plugins → '
-          + 'Plugin configuration → Perplexity web search to use perplexity_research.',
+          'Perplexity web search is disabled. Re-enable it in Settings → Built-in '
+          + 'plugins → Perplexity web search to use perplexity_research.',
           'WEB_PROVIDER_UNAVAILABLE',
         )
       }
@@ -357,7 +357,7 @@ function researchToolOptions(ctx, config, deps) {
       if (apiKey === undefined || apiKey.length === 0) {
         throw new WebError(
           'Perplexity API key is not configured. Set PERPLEXITY_API_KEY, '
-          + 'or open Settings → Plugins → Plugin configuration → Perplexity web search '
+          + 'or open Settings → Built-in plugins → Perplexity web search '
           + 'and save an API key there.',
           'WEB_PROVIDER_ERROR',
         )

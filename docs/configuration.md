@@ -54,11 +54,14 @@ Resolved in this order:
 
 The bundled patch layer deliberately does not list `apiKey`; the UI or the
 environment variable are the intended sources. Never put the key in a patch file.
+DSH's own generated configuration page honours that split: the key is the one
+`Config` field that is not `volatile()`, and that page renders exactly the volatile
+fields.
 
 ## The settings card
 
-Settings → Plugins → Plugin configuration shows a collapsible, editable
-`Perplexity web search` card for this namespace. Its first control is the master
+Settings → Built-in plugins → Perplexity web search shows a collapsible, editable
+card for this plugin's configuration namespace. Its first control is the master
 switch: one button that hands search back to the composition's own provider
 (`enabled: false`) or returns it to Perplexity. It writes on its own rather than
 through Save, so a user who only wants the built-in search back does not have to

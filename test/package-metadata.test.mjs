@@ -13,9 +13,8 @@
  *    which is what happened to the 0.1.6-rc.1 pin while this package was already
  *    at 0.1.7-rc.1.
  *
- * Offline and deterministic: three local files are read, nothing is fetched, and
- * no API quota is touched. `src/shared.js` imports nothing, so this runs with no
- * peers resolved.
+ * Offline and deterministic: local files are read and compared as text, nothing
+ * is fetched, no module under test is imported, and no API quota is touched.
  *
  * Run: npm test
  */
@@ -128,6 +127,30 @@ console.log('\n4. the light and dark diagrams are current')
     check(`the ${label} variant carries no media query`,
       generated !== undefined && !generated.includes('prefers-color-scheme'))
   }
+}
+
+// ── 5. The three copies of the configuration namespace agree ───────────────
+// DSH 0.2 addresses a plugin's configuration by the id of the Loader entry that
+// mounts it, and the id is written down in three independent places: the host's
+// exported `SETTINGS_NAMESPACE`, the browser half's own `NS`, and the row the
+// bundled patch inserts. They have to be the same string — the card registers
+// itself under it, the settings service keys the entry by it, and `whileServed`
+// watches it — and nothing else in the build would notice a drift, because each
+// copy is individually valid.
+console.log('\n5. the configuration namespace is one string, not three')
+{
+  const hostSource = readFileSync(join(repoRoot, 'src/index.js'), 'utf8')
+  const clientSource = readFileSync(join(repoRoot, 'src/client.js'), 'utf8')
+  const patch = readFileSync(join(repoRoot, 'cordis.patch.yml'), 'utf8')
+  const hostNs = hostSource.match(/export const SETTINGS_NAMESPACE = '([^']+)'/)?.[1]
+  const clientNs = clientSource.match(/const NS = '([^']+)'/)?.[1]
+  const rowIds = [...patch.matchAll(/^\s*-\s*id:\s*(\S+)\s*$/gm)].map((match) => match[1])
+  check('the host exports a non-empty namespace',
+    typeof hostNs === 'string' && hostNs.length > 0, String(hostNs))
+  check('the browser half declares the same namespace', clientNs === hostNs,
+    `client=${clientNs} host=${hostNs}`)
+  check('the bundled patch mounts the plugin under that id', rowIds.includes(hostNs),
+    `rows=${JSON.stringify(rowIds)}`)
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} CHECK(S) FAILED`)

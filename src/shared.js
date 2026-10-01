@@ -10,7 +10,7 @@
  */
 
 /** Attribution header sent with every request; keep in sync with `version`. */
-export const USER_AGENT = 'dsh-web-search-perplexity/0.1.7-rc.2'
+export const USER_AGENT = 'dsh-web-search-perplexity/0.2.0-rc.1'
 
 /**
  * Ceiling on a single 429 backoff, in milliseconds, whatever the server's

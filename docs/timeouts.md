@@ -53,7 +53,7 @@ preset-composed session enforces.
 
 To change it, copy the shipped composition to
 `$DSH_HOME/.agent-presets/<id>/agent.cordis.yml`, change `tool-web.searchTimeoutMs`
-there, and select that preset in `settings.yaml`. Editing the profile patch alone is
+there, and select that preset in the UI. Editing the profile patch alone is
 verified ineffective.
 
 ## Degradation is machine-readable

@@ -1,11 +1,14 @@
 /**
  * Browser half of @shjwudp/dsh-web-search-perplexity.
  *
- * Registers an editable `Perplexity web search` card in
- * Settings → Plugins → Plugin configuration, keyed by the
- * `web-search-perplexity` settings namespace. The card edits baseURL, preset,
+ * Registers an editable `Perplexity web search` card as one tab of
+ * Settings → Built-in plugins (the settings section
+ * `@deepseek-ai/dsh-client-ui-settings-plugins` owns), keyed by the
+ * `web-search-perplexity` settings namespace — the id of the
+ * profile entry that mounts this plugin. The card edits baseURL, preset,
  * model, maxTokens, searchRecency, the Agent-mode soft deadline and its fallback
- * preset, and the image settings through the settings scope; the API key is a
+ * preset, and the image settings through `ctx.configForms` (the entry's
+ * configuration form); the API key is a
  * write-only secret field backed by the credentials domain (never echoed).
  *
  * Defensive: if a required service or slot is unavailable in a given
@@ -20,7 +23,23 @@ window.__ModuleLoader__.load({
     try {
       const { createElement: h, useState } = require('react')
 
+      /**
+       * This plugin's dictionary namespace, and the id its settings card
+       * registers under.
+       *
+       * DSH 0.2 addresses a plugin's configuration by the id of the profile
+       * entry that mounts it, and this package ships that row as
+       * `id: web-search-perplexity`. The browser half cannot import the host
+       * module, so the string is repeated from the host's `SETTINGS_NAMESPACE`;
+       * `test/package-metadata.test.mjs` pins this string, that constant, and
+       * the bundled patch row together so they cannot drift.
+       */
       const NS = 'web-search-perplexity'
+      /**
+       * Where the card sits among the tabs of the Settings → Plugins section.
+       * The shipped read-only inventory registers itself at 10.
+       */
+      const TAB_ORDER = 20
       const DEFAULT_API_KEY_REF = 'PERPLEXITY_API_KEY'
       const AGENT_DEFAULT_MODEL = 'openai/gpt-5.6-luna'
       /**
@@ -585,6 +604,14 @@ window.__ModuleLoader__.load({
       }
 
       class PerplexityCardController {
+        /**
+         * @param scope - this entry's configuration form
+         *   (`ctx.configForms.get(NS)`). Its snapshot carries the same `status`,
+         *   `value`, `base`, `user`, and `writable` fields the card read before
+         *   DSH 0.2, so the projection below is unchanged; what changed is that
+         *   `set`/`unset` now answer whether the Host accepted the write.
+         * @param ctx - the browser plugin context.
+         */
         constructor(scope, ctx) {
           this.scope = scope
           this.ctx = ctx
@@ -820,13 +847,18 @@ window.__ModuleLoader__.load({
         }
 
         async store(field, value) {
-          await this.scope.set(field, value)
-          return this.userLayer()?.[field] === value
+          // DSH 0.2's form answers whether the Host accepted the write, and the
+          // mirror it derives from is folded before the answer settles, so the
+          // user layer is checked as well: either signal alone would be enough
+          // on a healthy write, and checking both keeps a landed write from
+          // being reported as a failure if the snapshot has not republished yet.
+          const accepted = await this.scope.set(field, value)
+          return accepted === true || this.userLayer()?.[field] === value
         }
 
         async clear(field) {
-          await this.scope.unset(field)
-          return !this.stored(field)
+          const accepted = await this.scope.unset(field)
+          return accepted === true || !this.stored(field)
         }
 
         /** Whether the plugin currently owns the `ctx.web` search seam. */
@@ -1175,6 +1207,8 @@ window.__ModuleLoader__.load({
 
       function apply(ctx) {
         if (!ctx || !ctx.slots || typeof ctx.slots.inject !== 'function') return
+        const forms = ctx.configForms
+        if (forms === undefined || typeof forms.get !== 'function') return
 
         try {
           registerDictionaries(ctx)
@@ -1183,23 +1217,39 @@ window.__ModuleLoader__.load({
         }
 
         try {
-          const scope = ctx.settingsScope.bind({ namespace: NS })
-          const card = new PerplexityCardController(scope, ctx)
-          ctx.slots.inject('settings.plugin.item', () => ctx.slots.register({
-            name: 'settings.plugin.item',
-            key: NS,
-            // Binds this card to the NS dictionary registered above, which is how
-            // the container supplies the `t` seat the card renders with.
-            locale: NS,
-            inject: () => card.inject(),
-          }, PerplexityCard))
+          // `ctx.locale.bind` gives the tab label the same namespace the card's
+          // `t` seat uses, so the label follows the active language too. A
+          // deployment without the locale service keeps a literal fallback
+          // rather than registering an unlabelled tab.
+          const bound = typeof ctx.locale?.bind === 'function' ? ctx.locale.bind(NS) : undefined
+          const label = bound === undefined ? () => 'Perplexity web search' : () => bound('card.title')
+          // The card is registered only while the Host actually serves this
+          // entry's namespace. A deployment that installed the package without
+          // composing its row would otherwise offer a page that can only say
+          // "unavailable"; `whileServed` keeps it absent instead, and brings it
+          // back — with a fresh form — the moment the row is mounted again.
+          const registerTab = () => forms.whileServed([NS], () => {
+            const card = new PerplexityCardController(forms.get(NS), ctx)
+            return ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+              name: 'settings.plugins.tab',
+              id: NS,
+              order: TAB_ORDER,
+              label,
+              // Binds this card to the NS dictionary registered above, which is
+              // how the container supplies the `t` seat the card renders with.
+              locale: NS,
+              inject: () => card.inject(),
+            }, PerplexityCard))
+          })
+          if (typeof ctx.effect === 'function') ctx.effect(registerTab, 'web-search-perplexity: settings tab')
+          else registerTab()
         } catch (error) {
           console.warn('[dsh-web-search-perplexity] settings card unavailable', error)
         }
       }
 
       exports.apply = apply
-      exports.inject = ['slots', 'settingsScope', 'remote', 'remote.credentials', 'locale']
+      exports.inject = ['slots', 'locale', 'remote', 'remote.credentials', 'configForms']
     } catch (error) {
       console.warn('[dsh-web-search-perplexity] client init failed', error)
       exports.apply = function () {}

@@ -114,7 +114,17 @@ export {
   searchApiRequestBody,
 } from './search-api.js'
 
-const SETTINGS_NAMESPACE = 'web-search-perplexity'
+/**
+ * This plugin's configuration namespace.
+ *
+ * DSH 0.2 replaced per-plugin settings sections with Loader-entry configuration:
+ * a plugin's namespace *is* the id of the entry that mounts it, and this package
+ * ships that row as `id: web-search-perplexity` in its bundled
+ * `cordis.patch.yml`. The browser half (which cannot import this module) repeats
+ * the same string as the id its card registers under, and
+ * `test/package-metadata.test.mjs` pins the three together so they cannot drift.
+ */
+export const SETTINGS_NAMESPACE = 'web-search-perplexity'
 const DEFAULT_BASE_URL = 'https://api.perplexity.ai'
 const DEFAULT_MAX_TOKENS = 1024
 const DEFAULT_API_KEY_ENV = 'PERPLEXITY_API_KEY'
@@ -229,55 +239,142 @@ export const DEGRADED_MARKER_PREFIX = '[DEGRADED] '
  */
 const SEARCH_RECENCY_VALUES = ['day', 'week', 'month', 'year']
 
-/** Durable settings section surfaced as a plugin-config card in the web UI. */
-const Config = z.object({
+/**
+ * The plugin's configuration schema, and the one place its shape is declared.
+ *
+ * Exported because DSH 0.2 derives a plugin's settings page from the `Config`
+ * export of its loaded module: the Loader validates (and defaults) this entry's
+ * config with it, and `ctx.settings.describe()` projects it into the form the
+ * web UI renders. A local `const` would leave the entry unvalidated and with no
+ * page at all.
+ *
+ * Every field is `volatile()` except {@link Config}'s `apiKey`. Volatility is
+ * what makes a field editable *live*: the Loader resolves a volatile field into
+ * a reference whose `get()` answers with the value currently in force, so a
+ * saved edit reaches the plugin without remounting it. It also means
+ * {@link liveConfig} must unwrap the section before anything reads it — a
+ * volatile field is a reference object, not the value.
+ *
+ * `apiKey` is deliberately the one non-volatile field. DSH's generated form
+ * renders exactly the volatile fields, and a form write is persisted into the
+ * profile's `cordis.patch.yml`; leaving the literal key out of that form is what
+ * keeps the plugin's promise that the key lives in the credentials domain and
+ * never in a patch file. A hand-written `apiKey` in the patch is still honoured
+ * on the next start — it simply has no UI control.
+ *
+ * This plugin's own card (`src/client.js`) is the custom page for the section;
+ * `enabled` below is its master switch.
+ */
+export const Config = z.object({
   apiKey: z.string().role('secret'),
-  apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV),
+  apiKeyEnv: z.string().role('credential-ref').default(DEFAULT_API_KEY_ENV).volatile(),
   // Master switch owned by this plugin's settings card. While false the plugin
   // releases the `ctx.web` seam selection so the composition's own provider
   // (the shipped `deepseek-official`) serves search again, and both Perplexity
-  // backends report themselves unavailable. Read per search, so toggling it in
-  // the UI applies to the next call instead of the next DSH start.
-  enabled: z.boolean().default(true),
-  preset: z.string().default(''),
-  baseURL: z.string().default(DEFAULT_BASE_URL),
-  model: z.string().default(AGENT_DEFAULT_MODEL),
-  maxTokens: z.number().step(1).min(1).default(DEFAULT_MAX_TOKENS),
-  searchRecency: z.string().default(''),
+  // backends report themselves unavailable. The seam id is released when the
+  // plugin loads with this false, so flipping it in the UI applies to the next
+  // search rather than the next DSH start.
+  enabled: z.boolean().default(true).volatile(),
+  preset: z.string().default('').volatile(),
+  baseURL: z.string().default(DEFAULT_BASE_URL).volatile(),
+  model: z.string().default(AGENT_DEFAULT_MODEL).volatile(),
+  maxTokens: z.number().step(1).min(1).default(DEFAULT_MAX_TOKENS).volatile(),
+  searchRecency: z.string().default('').volatile(),
   // No schema default: an unset deadline follows the configured preset, so the
   // default cannot drift out of step with the preset it is paired with.
-  softTimeoutMs: z.number().step(1).min(0),
-  fallbackPreset: z.string().default(DEFAULT_FALLBACK_PRESET),
+  softTimeoutMs: z.number().step(1).min(0).volatile(),
+  fallbackPreset: z.string().default(DEFAULT_FALLBACK_PRESET).volatile(),
   // Blank enables image input; only the literal "off"/"false"/"0" disables it,
   // so a cleared field cannot silently change what the provider sends. This
   // governs only a query that is ITSELF an image path or URL; the research
   // tool's explicit `image` argument does not consult it. The rule itself is
   // `isImageInputEnabled` in `./shared.js` — the one place that decides, called
   // by the request path and by what the settings UI exposes.
-  imageInput: z.string().default(''),
-  imageMaxBytes: z.number().step(1).min(1).default(DEFAULT_IMAGE_MAX_BYTES),
-  imageRoots: z.array(z.string()).default([]),
+  imageInput: z.string().default('').volatile(),
+  imageMaxBytes: z.number().step(1).min(1).default(DEFAULT_IMAGE_MAX_BYTES).volatile(),
+  imageRoots: z.array(z.string()).default([]).volatile(),
   // Which of this plugin's two backends serves searches. Blank keeps the Agent
   // API; only the Search API's id switches. Both are never registered as usable
   // at once, because two usable providers make the seam's selection ambiguous.
-  searchProvider: z.string().default(''),
-  searchType: z.string().default('web'),
-  searchDomains: z.array(z.string()).default([]),
-  searchLanguages: z.array(z.string()).default([]),
-  searchCountry: z.string().default(''),
-  searchContextSize: z.string().default('medium'),
-  searchMaxTokensPerPage: z.number().step(1).min(1),
-  searchAfterDate: z.string().default(''),
-  searchBeforeDate: z.string().default(''),
+  searchProvider: z.string().default('').volatile(),
+  searchType: z.string().default('web').volatile(),
+  searchDomains: z.array(z.string()).default([]).volatile(),
+  searchLanguages: z.array(z.string()).default([]).volatile(),
+  searchCountry: z.string().default('').volatile(),
+  searchContextSize: z.string().default('medium').volatile(),
+  searchMaxTokensPerPage: z.number().step(1).min(1).volatile(),
+  searchAfterDate: z.string().default('').volatile(),
+  searchBeforeDate: z.string().default('').volatile(),
   // The `perplexity_research` tool's own budget, independent of `tool-web`'s.
   // This is the tool's reason to exist, not a second deadline for search: a
   // quick search is bounded by `softTimeoutMs`, a research call by this.
-  researchTimeoutMs: z.number().step(1).min(0).default(DEFAULT_RESEARCH_TIMEOUT_MS),
+  researchTimeoutMs: z.number().step(1).min(0).default(DEFAULT_RESEARCH_TIMEOUT_MS).volatile(),
   // Default `depth` for a research call that names none. Blank keeps the built-in
   // default (`low`); an unknown value is ignored rather than breaking the tool, so
   // a typo cannot make research unavailable. Read per call, not at registration.
-  researchDepth: z.string().default(''),
+  researchDepth: z.string().default('').volatile(),
 })
+
+/**
+ * One plain snapshot of a resolved `Config` section.
+ *
+ * Every field above is `volatile()`, so the section the Loader hands `apply` is
+ * a record of live references rather than of values. Unwrapping here keeps that
+ * detail in one place: everything downstream — {@link resolveOptions}, the
+ * provider's `available()`, the research tool — keeps reading ordinary values,
+ * as it did when the section arrived from `settings.installSection`.
+ *
+ * A section from a host that did not resolve the schema (an older DSH, or a
+ * plugin mounted outside the Loader) already holds plain values, so a field
+ * without `get()` is passed through unchanged.
+ *
+ * @param config - the section `apply` received, possibly undefined.
+ * @returns its current values, unwrapped.
+ */
+export function liveConfig(config) {
+  const plain = {}
+  for (const [field, value] of Object.entries(config ?? {})) {
+    // A volatile field is a frozen reference object with `get()`; a plain value
+    // (an unwrapped section, or the non-volatile `apiKey`) is passed through.
+    const reference = typeof value === 'object' && value !== null ? value : undefined
+    const get = reference === undefined ? undefined : Reflect.get(reference, 'get')
+    plain[field] = typeof get === 'function' ? get.call(reference) : value
+  }
+  return plain
+}
+
+/**
+ * The seam provider id this plugin released, per `ctx.web` instance.
+ *
+ * `enabled: false` has to clear the seam's configured id rather than only
+ * report the provider unavailable: the seam answers a configured-but-unusable
+ * provider by throwing, never by falling back to another one. The id the
+ * composition named is remembered so re-enabling restores exactly it rather
+ * than assuming which provider the deployment pinned.
+ *
+ * It lives beside the seam rather than in `apply`'s closure because a live
+ * config edit restarts the plugin: a fresh closure would have forgotten the id
+ * and could never give it back.
+ */
+const releasedSeamProviders = new WeakMap()
+
+/**
+ * Apply the master switch to the seam's provider selection.
+ *
+ * @param web - the `ctx.web` service, used as the memory's key.
+ * @param enabled - the value of the `enabled` setting currently in force.
+ */
+function applySeamSelection(web, enabled) {
+  if (enabled) {
+    const released = releasedSeamProviders.get(web)
+    if (released === undefined) return
+    web.searchProviderId = released
+    releasedSeamProviders.delete(web)
+    return
+  }
+  if (web.searchProviderId !== undefined) releasedSeamProviders.set(web, web.searchProviderId)
+  web.searchProviderId = undefined
+}
 
 /** Map one structured Perplexity search result into a normalized source. */
 function mapPerplexityResult(result) {
@@ -570,7 +667,12 @@ function requestJson(url, apiKey, body, signal, retries = 2) {
  * @param {object} config - row config from cordis.yml / patch layers.
  */
 export function apply(ctx, config = {}) {
-  let current = () => config
+  // The Loader resolves volatile fields into references, so the section itself
+  // is not a record of values; this reads the section as it stands at each call
+  // rather than caching a snapshot. The Loader also restarts the plugin when the
+  // config changes, so `current` never observes a value the composition has
+  // already replaced.
+  const current = () => liveConfig(config)
 
   // The registrations below are the plugin's whole contribution, so a service
   // that cannot receive one is a misconfiguration to name, not to skip.
@@ -584,34 +686,12 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  // The seam resolves a configured-but-unavailable provider by throwing, never
-  // by falling back to an unconfigured one, so `enabled: false` cannot be
-  // expressed through `available()` alone: the configured id itself has to be
-  // released. The id that was released is remembered so re-enabling restores
-  // exactly it rather than assuming which provider the composition named.
-  let releasedSeamProvider
-  const applySeamSelection = () => {
-    if (current().enabled !== false) {
-      if (releasedSeamProvider !== undefined) {
-        ctx.web.searchProviderId = releasedSeamProvider
-        releasedSeamProvider = undefined
-      }
-      return
-    }
-    if (ctx.web.searchProviderId !== undefined) releasedSeamProvider = ctx.web.searchProviderId
-    ctx.web.searchProviderId = undefined
-  }
-
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, SETTINGS_NAMESPACE, Config, config, {
-      setSource: (source) => {
-        current = source
-      },
-      // installSection calls this once with the resolved section and again on
-      // every committed change, so the seam follows the card without a restart.
-      onChange: () => applySeamSelection(),
-    })
-  })
+  // The master switch, applied once for the section now in force. DSH derives
+  // this entry's settings page from the exported `Config` schema and restarts
+  // the plugin on every committed edit, so this call *is* the change handler
+  // the old `installSection` hook used to provide — there is nothing to
+  // subscribe to, and no card to install.
+  applySeamSelection(ctx.web, resolveOptions(ctx, current()).enabled)
 
   // Contribute an embedded research skill when the skill registry is mounted.
   // This is defensive: without the `dsh-skill` service the provider still works.
@@ -678,7 +758,7 @@ export function apply(ctx, config = {}) {
       if (apiKey === undefined || apiKey.length === 0) {
         throw new WebError(
           'Perplexity API key is not configured. Set PERPLEXITY_API_KEY, '
-          + 'or open Settings → Plugins → Plugin configuration → Perplexity web search '
+          + 'or open Settings → Built-in plugins → Perplexity web search '
           + 'and save an API key there.',
           'WEB_PROVIDER_ERROR',
         )

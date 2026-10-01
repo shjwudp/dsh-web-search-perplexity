@@ -47,6 +47,27 @@ function loadClientModule() {
 }
 
 /**
+ * The `ctx.configForms` service a DSH 0.2 client context provides.
+ *
+ * DSH 0.2 addresses a plugin's configuration by the id of the Loader entry that
+ * mounts it: `get(id)` answers with that entry's form, and `whileServed` runs a
+ * registration once the Host serves one of the named namespaces. The shim keeps
+ * the stand-in `scope` the tests drive.
+ *
+ * @param scope - the form stand-in the card controller reads and writes.
+ * @returns a stand-in for the service.
+ */
+function fakeConfigForms(scope) {
+  return {
+    get: () => scope,
+    whileServed: (namespaces, register) => {
+      register(new Set(namespaces))
+      return () => {}
+    },
+  }
+}
+
+/**
  * Build the card controller the card component receives.
  *
  * `slots.register(def, Component)` carries the component the settings tab renders;
@@ -69,10 +90,10 @@ function makeController(scopeOverrides = {}) {
       user,
     }),
     subscribe: () => () => {},
-    // Mirrors the real scope: `set` resolves `void`, so the only proof a write
-    // landed is the updated snapshot.
-    set: async (field, value) => { user[field] = value },
-    unset: async (field) => { delete user[field] },
+    // Mirrors the real form: `set` answers whether the Host accepted the write,
+    // and the snapshot it derives from is the other signal the card checks.
+    set: async (field, value) => { user[field] = value; return true },
+    unset: async (field) => { delete user[field]; return true },
     ...scopeOverrides,
   }
   const ctx = {
@@ -87,7 +108,7 @@ function makeController(scopeOverrides = {}) {
         return () => {}
       },
     },
-    settingsScope: { bind: () => scope },
+    configForms: fakeConfigForms(scope),
     remote: {
       credentials: {
         describe: async () => ({ ok: true, value: { PERPLEXITY_API_KEY: { configured: false, writable: true } } }),
@@ -130,19 +151,18 @@ console.log('\n2. a rejected credential write leaves the card recoverable')
 {
   const mod = loadClientModule()
   let controller
+  const scope = {
+    getSnapshot: () => ({ status: 'ready', writable: true, value: {}, base: {}, user: {} }),
+    subscribe: () => () => {},
+    set: async () => true,
+    unset: async () => true,
+  }
   const ctx = {
     slots: {
       inject: (_name, register) => register(),
       register: (slot) => { controller = slot.inject()?.hooks?.perplexityCard; return () => {} },
     },
-    settingsScope: {
-      bind: () => ({
-        getSnapshot: () => ({ status: 'ready', writable: true, value: {}, base: {}, user: {} }),
-        subscribe: () => () => {},
-        set: async () => {},
-        unset: async () => {},
-      }),
-    },
+    configForms: fakeConfigForms(scope),
     remote: {
       credentials: {
         describe: async () => ({ ok: true, value: {} }),
@@ -198,7 +218,7 @@ console.log('\n4. a successful save still behaves')
 
 // ── 5. The research settings are card fields, and clearing unsets them ────────
 // Before this the card had no research control at all: `researchDepth` and
-// `researchTimeoutMs` could only be written by hand in settings.yaml, so a user
+// `researchTimeoutMs` could only be written by hand in the config, so a user
 // could not see or change the default research cost from the UI. These pin that
 // both are projected, that a chosen value is written as the host expects (the
 // budget as a number, not the string the input holds), and that clearing the
@@ -302,13 +322,13 @@ console.log('\n6. the card only reads services it declares')
         inject: (_name, register) => register(),
         register: (slot) => { controller = slot.inject()?.hooks?.perplexityCard; return () => {} },
       },
-      settingsScope: { bind: () => scope },
+      configForms: fakeConfigForms(scope),
       remote,
       locale: undefined,
       effect: undefined,
     }
     // Gate the top-level names exactly as Cordis does.
-    for (const name of ['slots', 'settingsScope', 'remote', 'locale']) {
+    for (const name of ['slots', 'configForms', 'remote', 'locale']) {
       const value = ctx[name]
       Object.defineProperty(ctx, name, {
         configurable: true,
@@ -360,15 +380,15 @@ console.log('\n7. the master switch round-trips and gates on the host schema')
     const scope = {
       getSnapshot: () => ({ status: 'ready', writable: true, value, base: {}, user }),
       subscribe: () => () => {},
-      set: set ?? (async (field, next) => { calls.push(['set', field, next]); value[field] = next; user[field] = next }),
-      unset: async (field) => { calls.push(['unset', field]); delete value[field]; delete user[field] },
+      set: set ?? (async (field, next) => { calls.push(['set', field, next]); value[field] = next; user[field] = next; return true }),
+      unset: async (field) => { calls.push(['unset', field]); delete value[field]; delete user[field]; return true },
     }
     const ctx = {
       slots: {
         inject: (_name, register) => register(),
         register: (slot) => { controller = slot.inject()?.hooks?.perplexityCard; return () => {} },
       },
-      settingsScope: { bind: () => scope },
+      configForms: fakeConfigForms(scope),
       remote: {
         credentials: {
           describe: async () => ({ ok: true, value: {} }),
