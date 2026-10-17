@@ -196,7 +196,7 @@ from it, which is what the `<picture>` above loads.
 
 ```bash
 npm run check          # syntax-check the host, client, and generated skill module
-npm test               # ten suites, all offline, no API quota
+npm test               # eleven suites, all offline, no API quota
 npm run build:skill    # regenerate src/skill.js from the markdown skill source
 npm run build:diagram  # regenerate the light and dark architecture SVGs
 npm run sync:profile   # copy this working tree into every DSH profile that depends on it

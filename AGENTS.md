@@ -9,9 +9,9 @@ This repository is a standalone DeepSeek Harness plugin
 - `cordis.patch.yml` — bundled loader patch (inserts the plugin row)
 - `package.json` — package metadata, `dsh.bundle`, `dsh.client`, peer deps
 
-`AGENTS.md` and the example skill under `examples/` are development aids only;
-they are not part of the installed plugin runtime and are not published in the
-npm package.
+`AGENTS.md` and the skill source under `skills/perplexity-research/` are
+development aids only; they are not part of the installed plugin runtime and are
+not published in the npm package.
 
 ## Two copies of the skill, two load times
 

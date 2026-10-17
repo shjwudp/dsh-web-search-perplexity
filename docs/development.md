@@ -8,7 +8,7 @@ npm run build:diagram  # regenerate the light and dark architecture SVGs
 npm run sync:profile   # copy this working tree into every DSH profile that depends on it
 ```
 
-`npm test` runs ten suites, all offline: every one stubs `globalThis.fetch` (or the
+`npm test` runs eleven suites, all offline: every one stubs `globalThis.fetch` (or the
 browser half's module loader) and none consumes API quota.
 
 - `test/soft-deadline.test.mjs` loads the host module from this checkout when its
