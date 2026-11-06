@@ -206,3 +206,7 @@ npm run sync:profile   # copy this working tree into every DSH profile that depe
 
 Open an [issue](https://github.com/shjwudp/dsh-web-search-perplexity/issues) for a bug
 or a question. Licensed under MIT.
+
+## Smoke test
+
+This repository is also used as a smoke-test target for dsh-superagent.
